@@ -1,0 +1,29 @@
+[package]
+name = "fireplace_crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "Fireplace end-to-end encryption: identities, prekeys, handshake and the hybrid double ratchet"
+license = "AGPL-3.0-only"
+repository = "https://github.com/fireplacechat/fireplace-crypto"
+readme = "README.md"
+exclude = ["/tests", "/.github", "/target"]
+
+[lib]
+name = "fireplace_crypto"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "fast", "zeroize"] }
+getrandom = { version = "=0.4.1", features = ["std", "sys_rng"] }
+hkdf = { version = "=0.12.4", default-features = false }
+ml-dsa = { version = "=0.1.2", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
+ml-kem = { version = "=0.3.4", default-features = false, features = ["alloc", "zeroize"] }
+rand_core = { version = "=0.10.0" }
+sha2 = { version = "=0.10.9", default-features = false }
+x25519-dalek = { version = "=3.0.0", default-features = false, features = ["precomputed-tables", "static_secrets", "zeroize"] }
+zeroize = { version = "=1.8.2", features = ["derive"] }
+
+[profile.release]
+panic = "unwind"
