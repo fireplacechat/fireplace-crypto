@@ -1,0 +1,47 @@
+# Linux only. The job that runs the tests is named test.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: 1.98.1
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features test-rng -- -D warnings
+      # FP_REQUIRE_VECTORS makes a missing tests/vectors directory fail this job.
+      # A packaged crate has no such directory, so its own tests skip instead.
+      - run: cargo test --locked --all-targets --features test-rng
+        env:
+          FP_REQUIRE_VECTORS: "1"
+      # The feature is off here. The test stream must not be in the release library.
+      - run: cargo build --release --locked
+      - name: release build does not export the test rng
+        run: |
+          set -euo pipefail
+          so=target/release/libfireplace_crypto.so
+          if nm -D "$so" | grep -E 'fp_set_test_rng|fp_clear_test_rng'; then
+            echo "test rng symbol is exported from the release build"
+            exit 1
+          fi
+          nm -D "$so" | grep -q fp_free
+      # CI-only. Not a library dependency. Versions are pinned.
+      - run: cargo install cargo-audit --version 0.23.0 --locked
+      - run: cargo audit
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny check
