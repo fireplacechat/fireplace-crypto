@@ -23,6 +23,8 @@ mod session;
 
 #[cfg(test)]
 mod dart_vectors;
+#[cfg(test)]
+mod known_answer;
 
 pub use device::{DeviceBundle, DeviceKeys};
 pub use error::{Error, Result};

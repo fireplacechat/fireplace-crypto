@@ -6,6 +6,8 @@ Work in progress. It follows Fireplace's design decisions (0002, 0003 and 0035 i
 
 `ml-kem` and `ml-dsa` say they have not been independently audited. `aes-gcm` was audited by NCC Group. This crate does not claim an audit. The comparison with libcrux is in `docs/dependencies.md`.
 
-The C ABI is `include/fireplace_crypto.h`. Callers free every returned buffer with `fp_free`.
+The crates.io package is `fireplace-crypto`. Rust code imports `fireplace_crypto`, and that is also the C library name.
+
+The C ABI is `include/fireplace_crypto.h`. Callers free every returned buffer with `fp_free`, which wipes the buffer first. `fp_set_test_rng` is compiled only with the `test-rng` feature. That feature is off by default, so a normal build does not contain the symbol.
 
 Licence: [AGPL-3.0](LICENSE).

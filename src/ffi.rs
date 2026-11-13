@@ -1,24 +1,29 @@
 //! C ABI. Every output buffer is allocated by the library and released with
-//! [`fp_free`]. A panic inside an exported function becomes `FP_PANIC` and
-//! does not unwind into the caller.
+//! [`fp_free`], which wipes the bytes first. A panic inside an exported
+//! function becomes `FP_PANIC` and does not unwind into the caller.
 //!
-//! The test stream (`fp_set_test_rng`) replaces the operating-system generator
-//! for every call until it is cleared. It is process-global and meant for one
-//! thread.
+//! `fp_set_test_rng` is compiled only with the `test-rng` feature, which is
+//! off by default. A normal build does not export that symbol or
+//! `fp_clear_test_rng`. With the feature on, the stream replaces the
+//! operating-system generator for this process until it is cleared, and only
+//! one thread may use it.
 //!
 //! # Safety
 //!
 //! Each pointer must address `len` bytes, or be null where this file says a
 //! null is allowed. An output `FpBuf` must be writable. The caller releases
 //! every returned buffer with [`fp_free`] and does not use it afterwards.
-//! [`fp_set_test_rng`] is one thread at a time. The functions share that
-//! contract, so the per-function safety lint is allowed here.
+//! The functions share that contract, so the per-function safety lint is
+//! allowed here.
 
 #![allow(unsafe_code)]
 #![allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 
 use std::panic::AssertUnwindSafe;
+#[cfg(feature = "test-rng")]
 use std::sync::Mutex;
+
+use zeroize::Zeroize;
 
 use crate::device::{DeviceBundle, DeviceKeys};
 use crate::error::{Error, Result};
@@ -45,32 +50,41 @@ pub struct FpBuf {
     pub len: usize,
 }
 
+#[cfg(feature = "test-rng")]
 struct TestStream {
     data: Vec<u8>,
 }
 
+#[cfg(feature = "test-rng")]
 static TEST_RNG: Mutex<Option<TestStream>> = Mutex::new(None);
 
 fn with_rng<T>(body: impl FnOnce(&mut Rng) -> Result<T>) -> Result<T> {
+    #[cfg(feature = "test-rng")]
+    {
+        with_test_rng(body)
+    }
+    #[cfg(not(feature = "test-rng"))]
+    {
+        body(&mut Rng::os())
+    }
+}
+
+#[cfg(feature = "test-rng")]
+fn with_test_rng<T>(body: impl FnOnce(&mut Rng) -> Result<T>) -> Result<T> {
     let mut guard = TEST_RNG.lock().unwrap_or_else(|poison| poison.into_inner());
     if let Some(stream) = guard.as_mut() {
         let mut rng = Rng::stream(std::mem::take(&mut stream.data));
         let result = body(&mut rng);
         if let Some(left) = rng.remaining() {
-            let data = rng_into_rest(&mut rng, left);
-            stream.data = data;
+            // Rebuild the unconsumed tail by drawing it. `remaining` was
+            // checked above, so this draw succeeds.
+            stream.data = rng.bytes(left).unwrap_or_default();
         }
         result
     } else {
         drop(guard);
         body(&mut Rng::os())
     }
-}
-
-fn rng_into_rest(rng: &mut Rng, left: usize) -> Vec<u8> {
-    // Rebuild the unconsumed tail by drawing it. `remaining` was checked by
-    // the caller, so this draw succeeds and leaves the original stream empty.
-    rng.bytes(left).unwrap_or_default()
 }
 
 fn code(error: Error) -> i32 {
@@ -112,16 +126,42 @@ unsafe fn text<'a>(ptr: *const u8, len: usize) -> Result<&'a str> {
     std::str::from_utf8(bytes).map_err(|_| Error::Invalid("utf8"))
 }
 
+/// Hand `bytes` to the caller without a shrinking copy. `Vec::into_boxed_slice`
+/// reallocates when `capacity != len` and frees the old allocation unwiped.
+/// That path copies into an exact buffer and wipes the source instead.
+fn take_exact(mut bytes: Vec<u8>) -> (*mut u8, usize) {
+    let len = bytes.len();
+    if len == 0 {
+        bytes.zeroize();
+        return (std::ptr::null_mut(), 0);
+    }
+    if bytes.capacity() == len {
+        let ptr = Box::into_raw(bytes.into_boxed_slice()).cast::<u8>();
+        return (ptr, len);
+    }
+    let mut exact = vec![0u8; len];
+    exact.copy_from_slice(&bytes);
+    bytes.zeroize();
+    let ptr = Box::into_raw(exact.into_boxed_slice()).cast::<u8>();
+    (ptr, len)
+}
+
+fn free_buf(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    let slice = unsafe { &mut *std::ptr::slice_from_raw_parts_mut(ptr, len) };
+    slice.zeroize();
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+}
+
 fn write_buf(out: *mut FpBuf, bytes: Vec<u8>) -> Result<()> {
     if out.is_null() {
+        let mut bytes = bytes;
+        bytes.zeroize();
         return Err(Error::BadArg);
     }
-    let len = bytes.len();
-    let ptr = if len == 0 {
-        std::ptr::null_mut()
-    } else {
-        Box::into_raw(bytes.into_boxed_slice()).cast::<u8>()
-    };
+    let (ptr, len) = take_exact(bytes);
     unsafe {
         *out = FpBuf { ptr, len };
     }
@@ -150,7 +190,7 @@ fn rollback(out: *mut FpBuf) {
         return;
     }
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(buf.ptr, buf.len)) });
+        free_buf(buf.ptr, buf.len);
     }));
 }
 
@@ -178,25 +218,30 @@ fn write_flag(slot: *mut i32, value: bool) -> Result<()> {
     Ok(())
 }
 
-/// Release a buffer returned by this library. `len` must be the length that
-/// was returned with `ptr`. A null pointer is ignored.
+/// Release a buffer returned by this library. The bytes are wiped before the
+/// allocation is freed. `len` must be the length that was returned with `ptr`.
+/// A null pointer is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fp_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+        free_buf(ptr, len);
     }));
 }
 
 /// Install a finite stream used instead of the operating system. An empty
-/// slice clears it. Single-threaded.
+/// slice clears it. Single-threaded. Absent unless the `test-rng` feature is on.
+#[cfg(feature = "test-rng")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fp_set_test_rng(bytes: *const u8, len: usize) -> i32 {
     call(|| {
         let data = unsafe { slice(bytes, len)? }.to_vec();
         let mut guard = TEST_RNG.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(previous) = guard.as_mut() {
+            previous.data.zeroize();
+        }
         *guard = if data.is_empty() {
             None
         } else {
@@ -206,12 +251,19 @@ pub unsafe extern "C" fn fp_set_test_rng(bytes: *const u8, len: usize) -> i32 {
     })
 }
 
+#[cfg(feature = "test-rng")]
 #[unsafe(no_mangle)]
 pub extern "C" fn fp_clear_test_rng() {
-    if let Ok(mut guard) = TEST_RNG.lock() {
+    let clear = |guard: &mut Option<TestStream>| {
+        if let Some(previous) = guard.as_mut() {
+            previous.data.zeroize();
+        }
         *guard = None;
+    };
+    if let Ok(mut guard) = TEST_RNG.lock() {
+        clear(&mut guard);
     } else if let Err(poison) = TEST_RNG.lock() {
-        *poison.into_inner() = None;
+        clear(&mut poison.into_inner());
     }
 }
 
@@ -750,4 +802,29 @@ pub unsafe extern "C" fn fp_identity_fingerprint(
         let text = identity_fingerprint(unsafe { slice(identity, identity_len)? })?;
         write_buf(out_text, text.into_bytes())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_exact;
+
+    #[test]
+    fn spare_capacity_is_not_the_buffer_handed_to_the_caller() {
+        let mut spare = Vec::with_capacity(64);
+        spare.extend_from_slice(b"secret");
+        assert!(spare.capacity() > spare.len());
+        let (ptr, len) = take_exact(spare);
+        assert_eq!(len, 6);
+        let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(got, b"secret");
+        super::free_buf(ptr, len);
+
+        let mut exact = Vec::with_capacity(6);
+        exact.extend_from_slice(b"secret");
+        assert_eq!(exact.capacity(), exact.len());
+        let (ptr, len) = take_exact(exact);
+        let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(got, b"secret");
+        super::free_buf(ptr, len);
+    }
 }

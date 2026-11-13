@@ -4,14 +4,17 @@
 use std::sync::Mutex;
 
 use fireplace_crypto::ffi::{
-    FP_BAD_ARG, FP_INVALID, FP_OK, FpBuf, fp_clear_test_rng, fp_free, fp_identity_generate,
-    fp_recovery_parse, fp_session_validate, fp_set_test_rng,
+    FP_BAD_ARG, FP_INVALID, FP_OK, FpBuf, fp_recovery_parse, fp_session_validate,
 };
+#[cfg(feature = "test-rng")]
+use fireplace_crypto::ffi::{fp_clear_test_rng, fp_free, fp_identity_generate, fp_set_test_rng};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(feature = "test-rng")]
 struct Owned(FpBuf);
 
+#[cfg(feature = "test-rng")]
 impl Owned {
     fn text(&self) -> &str {
         assert!(!self.0.ptr.is_null());
@@ -20,12 +23,14 @@ impl Owned {
     }
 }
 
+#[cfg(feature = "test-rng")]
 impl Drop for Owned {
     fn drop(&mut self) {
         unsafe { fp_free(self.0.ptr, self.0.len) };
     }
 }
 
+#[cfg(feature = "test-rng")]
 fn generate_identity() -> (i32, Owned) {
     let mut out = FpBuf {
         ptr: std::ptr::null_mut(),
@@ -35,6 +40,7 @@ fn generate_identity() -> (i32, Owned) {
     (code, Owned(out))
 }
 
+#[cfg(feature = "test-rng")]
 #[test]
 fn seeded_identity_matches_and_null_arguments_are_rejected() {
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -66,6 +72,7 @@ fn seeded_identity_matches_and_null_arguments_are_rejected() {
 #[test]
 fn malformed_recovery_and_session_json_do_not_look_valid() {
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    #[cfg(feature = "test-rng")]
     fp_clear_test_rng();
     let text = b"not-a-recovery-key";
     let mut out = FpBuf {

@@ -22,8 +22,20 @@ jobs:
           toolchain: 1.98.1
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features test-rng -- -D warnings
+      - run: cargo test --locked --all-targets --features test-rng
+      # The feature is off here. The test stream must not be in the release library.
+      - run: cargo build --release --locked
+      - name: release build does not export the test rng
+        run: |
+          set -euo pipefail
+          so=target/release/libfireplace_crypto.so
+          if nm -D "$so" | grep -E 'fp_set_test_rng|fp_clear_test_rng'; then
+            echo "test rng symbol is exported from the release build"
+            exit 1
+          fi
+          nm -D "$so" | grep -q fp_free
       # CI-only. Not a library dependency. Versions are pinned.
       - run: cargo install cargo-audit --version 0.23.0 --locked
       - run: cargo audit

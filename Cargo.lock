@@ -270,7 +270,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
-name = "fireplace_crypto"
+name = "fireplace-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
@@ -281,6 +281,7 @@ dependencies = [
  "ml-kem",
  "rand_core",
  "sha2 0.10.9",
+ "subtle",
  "x25519-dalek",
  "zeroize",
 ]

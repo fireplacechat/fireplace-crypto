@@ -10,9 +10,13 @@
  * argument. A verify function that returns false is still 0, with *out_ok
  * set to 0.
  *
- * fp_set_test_rng replaces the operating-system generator for this process
- * until it is cleared. It is for tests, and only one thread may use it.
- * Passing an empty slice clears it, as does fp_clear_test_rng.
+ * fp_free wipes a returned buffer before freeing it.
+ *
+ * fp_set_test_rng and fp_clear_test_rng are compiled only with the Cargo
+ * feature test-rng, which is off by default. A normal release build does
+ * not export them. Define FP_TEST_RNG when the library was built with that
+ * feature. With it on, the stream replaces the operating-system generator
+ * for this process until it is cleared, and only one thread may use it.
  *
  * fp_session_decrypt reads *now_ms when that pointer is non-null. A null
  * pointer uses the system clock. A null or empty one-time prekey on
@@ -44,8 +48,10 @@ typedef struct FpBuf {
 } FpBuf;
 
 void fp_free(uint8_t *ptr, size_t len);
+#ifdef FP_TEST_RNG
 int32_t fp_set_test_rng(const uint8_t *bytes, size_t len);
 void fp_clear_test_rng(void);
+#endif
 
 int32_t fp_identity_generate(FpBuf *out_json);
 int32_t fp_identity_public(const uint8_t *json, size_t json_len, FpBuf *out);

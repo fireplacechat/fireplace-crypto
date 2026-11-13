@@ -4,8 +4,9 @@
 
 use crate::codec::{self, Json};
 use crate::device::DeviceKeys;
+use crate::fingerprint::{identity_fingerprint, safety_number};
 use crate::identity::AccountIdentity;
-use crate::link::seal as link_seal;
+use crate::link::{confirmation_code, request_fingerprint, seal as link_seal};
 use crate::prekeys::{self, PreKeyBundle, PreKeyRecord};
 use crate::recovery::{self, RecoveryKey};
 use crate::rng::Rng;
@@ -16,7 +17,9 @@ fn pattern() -> Vec<u8> {
 }
 
 fn root() -> Json {
-    codec::parse_json(include_str!("../tests/vectors/dart_vectors.json")).expect("vector json")
+    // Synthetic vectors, shipped with the crate so this test compiles from a
+    // packaged source tree. NIST and Wycheproof files stay under tests/.
+    codec::parse_json(include_str!("../vectors/dart_vectors.json")).expect("vector json")
 }
 
 fn object<'a>(value: &'a Json, key: &str) -> &'a [(String, Json)] {
@@ -174,6 +177,36 @@ fn scripted_handshake_matches_dart() {
         text(section, "aliceSession"),
     );
     same("envelope", &envelope.to_json(), text(section, "envelope"));
+
+    let alice_pub = alice_id.public_bytes().unwrap();
+    let bob_pub = bob_id.public_bytes().unwrap();
+    same(
+        "alice fingerprint",
+        &identity_fingerprint(&alice_pub).unwrap(),
+        text(section, "aliceFingerprint"),
+    );
+    same(
+        "bob fingerprint",
+        &identity_fingerprint(&bob_pub).unwrap(),
+        text(section, "bobFingerprint"),
+    );
+    let safety = safety_number(&alice_pub, &bob_pub).unwrap();
+    same("safety number", &safety, text(section, "safety"));
+    same(
+        "safety number swapped",
+        &safety_number(&bob_pub, &alice_pub).unwrap(),
+        text(section, "safetySwapped"),
+    );
+    same(
+        "link fingerprint",
+        &request_fingerprint(&bob_keys.x25519_pub, &bob_keys.kem_pub).unwrap(),
+        text(section, "linkFingerprint"),
+    );
+    same(
+        "link code",
+        &confirmation_code(&alice_pub, &bob_keys.x25519_pub, &bob_keys.kem_pub).unwrap(),
+        text(section, "linkCode"),
+    );
 }
 
 #[test]
@@ -274,6 +307,90 @@ fn rust_fixture_round_trips() {
         std::fs::write(&path, format!("{doc}\n")).unwrap();
     }
     let _ = doc;
+}
+
+#[test]
+fn scripted_transcript_matches_dart() {
+    let doc = root();
+    let section = object(&doc, "transcript");
+    let prekey_now = codec::obj_i64(section, "prekeyNow").unwrap();
+    let mut rng = Rng::stream(pattern());
+
+    let alice_id = AccountIdentity::generate(&mut rng).unwrap();
+    let alice_keys = DeviceKeys::generate(&mut rng).unwrap();
+    let alice_bundle = alice_keys.certify(&alice_id, "alice", &mut rng).unwrap();
+    let bob_id = AccountIdentity::generate(&mut rng).unwrap();
+    let bob_keys = DeviceKeys::generate(&mut rng).unwrap();
+    let bob_bundle = bob_keys.certify(&bob_id, "bob", &mut rng).unwrap();
+    let signed_record = PreKeyRecord::generate(&mut rng, prekey_now).unwrap();
+    let signed = prekeys::sign(
+        &signed_record,
+        &bob_id,
+        "bob",
+        &bob_keys.device_id,
+        &mut rng,
+    )
+    .unwrap();
+    let one_time_record = PreKeyRecord::generate(&mut rng, prekey_now).unwrap();
+    let remote = PreKeyBundle {
+        device: bob_bundle.clone(),
+        signed,
+        one_time: Some(prekeys::one_time(&one_time_record)),
+    };
+    let alice_created = created_at(text(section, "aliceFinal"));
+    let (mut alice, handshake) =
+        Session::initiate(&alice_keys, &alice_bundle, &remote, &mut rng, alice_created).unwrap();
+    let bob_created = created_at(text(section, "bobFinal"));
+    let mut bob = Session::accept(
+        &bob_keys,
+        &bob_bundle,
+        &alice_bundle,
+        &handshake,
+        &signed_record,
+        Some(&one_time_record),
+        bob_created,
+    )
+    .unwrap();
+
+    let first = alice.encrypt(b"one", "chat-1", &mut rng).unwrap();
+    let second = alice.encrypt(b"two", "chat-1", &mut rng).unwrap();
+    same("alice 0", &first.to_json(), text(section, "aliceToBob0"));
+    same("alice 1", &second.to_json(), text(section, "aliceToBob1"));
+
+    let late = bob
+        .decrypt(&second, "chat-1", &mut rng, bob_created)
+        .unwrap();
+    assert_eq!(late, b"two");
+    same(
+        "bob after skip",
+        &bob.to_json(),
+        text(section, "bobAfterSkip"),
+    );
+    let early = bob
+        .decrypt(&first, "chat-1", &mut rng, bob_created)
+        .unwrap();
+    assert_eq!(early, b"one");
+
+    let reply0 = bob.encrypt(b"three", "chat-1", &mut rng).unwrap();
+    let reply1 = bob.encrypt(b"four", "chat-1", &mut rng).unwrap();
+    same("bob 0", &reply0.to_json(), text(section, "bobToAlice0"));
+    same("bob 1", &reply1.to_json(), text(section, "bobToAlice1"));
+    same("bob final", &bob.to_json(), text(section, "bobFinal"));
+
+    let alice_late = alice
+        .decrypt(&reply1, "chat-1", &mut rng, alice_created)
+        .unwrap();
+    assert_eq!(alice_late, b"four");
+    same(
+        "alice after skip",
+        &alice.to_json(),
+        text(section, "aliceAfterSkip"),
+    );
+    let alice_early = alice
+        .decrypt(&reply0, "chat-1", &mut rng, alice_created)
+        .unwrap();
+    assert_eq!(alice_early, b"three");
+    same("alice final", &alice.to_json(), text(section, "aliceFinal"));
 }
 
 #[test]

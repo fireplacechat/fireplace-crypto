@@ -24,11 +24,14 @@ accepts the licences below.
 | ml-kem | 0.3.4 | alloc, zeroize | Apache-2.0 OR MIT |
 | rand_core | 0.10.0 | default | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | (none; default features off) | MIT OR Apache-2.0 |
+| subtle | 2.6.1 | (none; default features off) | BSD-3-Clause |
 | x25519-dalek | 3.0.0 | precomputed-tables, static_secrets, zeroize | BSD-3-Clause |
 | zeroize | 1.8.2 | derive | Apache-2.0 OR MIT |
 
 `ml-kem` and `ml-dsa` enable their own `zeroize` feature. Depending on the
-`zeroize` crate alone would not wipe their keys.
+`zeroize` crate alone would not wipe their keys. `subtle` compares
+equal-length secrets in constant time. It was already pulled in by other
+crates; it is now a direct dependency, with its default features off.
 
 ## Advisories that matter here
 

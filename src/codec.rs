@@ -5,6 +5,9 @@
 //! the recovery backup encrypts that exact text. A missing field and a JSON
 //! `null` are the same thing, because Dart's `j[k] == null` is true for both.
 
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
+
 use crate::error::{Error, Result};
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -134,17 +137,13 @@ pub fn u64_bytes(n: u64) -> [u8; 8] {
     n.to_be_bytes()
 }
 
-/// Length check, then the OR of every byte difference. Not a promise of
-/// constant-time execution; this is the comparison the Dart code uses.
+/// Equal lengths are compared in constant time. A different length returns
+/// false at once, which is the same length check the Dart code uses.
 pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    bool::from(a.ct_eq(b))
 }
 
 pub fn concat(parts: &[&[u8]]) -> Vec<u8> {
@@ -207,6 +206,23 @@ impl Json {
     }
 }
 
+impl Drop for Json {
+    fn drop(&mut self) {
+        // Parsed and built documents hold seeds, session state and plaintext.
+        // Wipe those strings when the value is dropped. Callers still have to
+        // wipe any `String` they already copied out.
+        match self {
+            Json::Str(text) => text.zeroize(),
+            Json::Obj(pairs) => {
+                for (key, _) in pairs.iter_mut() {
+                    key.zeroize();
+                }
+            }
+            Json::Null | Json::Bool(_) | Json::Int(_) | Json::Arr(_) => {}
+        }
+    }
+}
+
 /// Look up `key`. Missing and JSON `null` are both `None`.
 pub fn obj_opt<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
     obj.iter()
@@ -263,13 +279,26 @@ pub fn b64_field(
     Ok(bytes)
 }
 
+/// Nested arrays and objects deeper than this are rejected. Fireplace's
+/// stored documents are a few levels deep. The cap is what stops a hostile
+/// document from overflowing the stack: that abort cannot be caught.
+const MAX_JSON_DEPTH: usize = 32;
+
+/// Larger than a session (the ciphertext cap is 128 KiB, and at most 1,000
+/// skipped keys) and large enough for the known-answer files. The check
+/// happens before the parser walks the text.
+const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
+
 pub fn parse_json(input: &str) -> Result<Json> {
+    if input.len() > MAX_JSON_BYTES {
+        return Err(Error::Invalid("json too large"));
+    }
     let mut parser = Parser {
         bytes: input.as_bytes(),
         i: 0,
     };
     parser.skip_ws();
-    let value = parser.value()?;
+    let value = parser.value(0)?;
     parser.skip_ws();
     if parser.i != parser.bytes.len() {
         return Err(Error::Invalid("trailing json"));
@@ -309,15 +338,18 @@ impl<'a> Parser<'a> {
         Ok(c)
     }
 
-    fn value(&mut self) -> Result<Json> {
+    fn value(&mut self, depth: usize) -> Result<Json> {
+        if depth > MAX_JSON_DEPTH {
+            return Err(Error::Invalid("json too deep"));
+        }
         self.skip_ws();
         match self.peek().ok_or(Error::Invalid("truncated json"))? {
             b'n' => self.literal(b"null", Json::Null),
             b't' => self.literal(b"true", Json::Bool(true)),
             b'f' => self.literal(b"false", Json::Bool(false)),
             b'"' => Ok(Json::Str(self.string()?)),
-            b'[' => self.array(),
-            b'{' => self.object(),
+            b'[' => self.array(depth),
+            b'{' => self.object(depth),
             b'-' | b'0'..=b'9' => self.number(),
             _ => Err(Error::Invalid("json value")),
         }
@@ -332,7 +364,7 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    fn object(&mut self) -> Result<Json> {
+    fn object(&mut self, depth: usize) -> Result<Json> {
         self.bump()?;
         let mut pairs: Vec<(String, Json)> = Vec::new();
         loop {
@@ -358,7 +390,7 @@ impl<'a> Parser<'a> {
             if self.bump()? != b':' {
                 return Err(Error::Invalid("json colon"));
             }
-            let value = self.value()?;
+            let value = self.value(depth + 1)?;
             if let Some(existing) = pairs.iter_mut().find(|(k, _)| k == &key) {
                 existing.1 = value;
             } else {
@@ -367,7 +399,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn array(&mut self) -> Result<Json> {
+    fn array(&mut self, depth: usize) -> Result<Json> {
         self.bump()?;
         let mut items = Vec::new();
         loop {
@@ -384,7 +416,7 @@ impl<'a> Parser<'a> {
                 Some(_) if items.is_empty() => {}
                 _ => return Err(Error::Invalid("json array")),
             }
-            items.push(self.value()?);
+            items.push(self.value(depth + 1)?);
         }
     }
 
@@ -615,5 +647,31 @@ mod tests {
         let value = Json::Str("a\"b\\c\n\u{0001}".to_string());
         assert_eq!(to_json(&value), r#""a\"b\\c\n\u0001""#);
         assert_eq!(parse_json(&to_json(&value)).unwrap(), value);
+    }
+
+    #[test]
+    fn bytes_equal_checks_every_byte_and_rejects_a_different_length() {
+        assert!(bytes_equal(b"abc", b"abc"));
+        assert!(!bytes_equal(b"abc", b"abd"));
+        assert!(!bytes_equal(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn json_rejects_deep_nesting_and_oversized_input() {
+        let mut deep = "[".repeat(MAX_JSON_DEPTH);
+        deep.push('1');
+        deep.push_str(&"]".repeat(MAX_JSON_DEPTH));
+        assert!(
+            parse_json(&deep).is_ok(),
+            "depth {MAX_JSON_DEPTH} is allowed"
+        );
+        deep.insert(0, '[');
+        deep.push(']');
+        assert!(
+            parse_json(&deep).is_err(),
+            "one level past the cap is refused"
+        );
+        let big = " ".repeat(MAX_JSON_BYTES + 1);
+        assert!(parse_json(&big).is_err());
     }
 }
