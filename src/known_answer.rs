@@ -28,7 +28,12 @@ fn vectors_dir() -> Option<PathBuf> {
 }
 
 fn fixture(name: &str) -> Option<Json> {
-    let dir = vectors_dir()?;
+    let Some(dir) = vectors_dir() else {
+        if std::env::var_os("FP_REQUIRE_VECTORS").is_some() {
+            panic!("tests/vectors is missing; FP_REQUIRE_VECTORS is set");
+        }
+        return None;
+    };
     let path = dir.join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(

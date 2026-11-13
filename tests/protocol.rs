@@ -221,6 +221,7 @@ fn reflected_chain_and_wrong_session_do_not_spend_the_budget() {
     );
 }
 
+#[cfg(feature = "test-rng")]
 #[test]
 fn same_stream_is_byte_for_byte() {
     let pattern: Vec<u8> = (0..8192).map(|i| (i * 17 + 3) as u8).collect();
@@ -230,6 +231,7 @@ fn same_stream_is_byte_for_byte() {
     assert_ne!(scripted(&pattern), scripted(&vec![9u8; pattern.len()]));
 }
 
+#[cfg(feature = "test-rng")]
 fn scripted(stream: &[u8]) -> String {
     let mut rng = Rng::stream(stream.to_vec());
     let identity = AccountIdentity::generate(&mut rng).unwrap();

@@ -307,8 +307,15 @@ pub fn parse_json(input: &str) -> Result<Json> {
 }
 
 pub fn to_json(value: &Json) -> String {
-    let mut out = String::new();
+    // Reserve the exact encoded length first. A growing `String` frees each
+    // earlier copy without wiping it, and those copies hold keys and session
+    // state. The allocator may round the reservation up; the write must not
+    // ask for more than that.
+    let mut out = String::with_capacity(json_len(value));
+    let reserved = out.capacity();
     write_json(&mut out, value);
+    debug_assert_eq!(out.len(), json_len(value));
+    debug_assert_eq!(out.capacity(), reserved);
     out
 }
 
@@ -541,13 +548,66 @@ fn utf8_width(first: u8) -> Option<usize> {
     }
 }
 
+fn json_len(value: &Json) -> usize {
+    match value {
+        Json::Null => 4,
+        Json::Bool(true) => 4,
+        Json::Bool(false) => 5,
+        Json::Int(n) => int_len(*n),
+        Json::Str(text) => string_len(text),
+        Json::Arr(items) => {
+            let commas = items.len().saturating_sub(1);
+            2 + commas + items.iter().map(json_len).sum::<usize>()
+        }
+        Json::Obj(pairs) => {
+            let commas = pairs.len().saturating_sub(1);
+            let colons = pairs.len();
+            2 + commas
+                + colons
+                + pairs
+                    .iter()
+                    .map(|(key, value)| string_len(key) + json_len(value))
+                    .sum::<usize>()
+        }
+    }
+}
+
+fn int_len(n: i64) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    if n == i64::MIN {
+        return 20;
+    }
+    let negative = n < 0;
+    let mut n = n.unsigned_abs();
+    let mut len = usize::from(negative);
+    while n > 0 {
+        len += 1;
+        n /= 10;
+    }
+    len
+}
+
+fn string_len(text: &str) -> usize {
+    let mut len = 2;
+    for ch in text.chars() {
+        len += match ch {
+            '"' | '\\' | '\u{0008}' | '\u{000c}' | '\n' | '\r' | '\t' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        };
+    }
+    len
+}
+
 fn write_json(out: &mut String, value: &Json) {
     match value {
         Json::Null => out.push_str("null"),
         Json::Bool(true) => out.push_str("true"),
         Json::Bool(false) => out.push_str("false"),
-        Json::Int(n) => out.push_str(&n.to_string()),
-        Json::Str(s) => write_string(out, s),
+        Json::Int(n) => write_int(out, *n),
+        Json::Str(text) => write_string(out, text),
         Json::Arr(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
@@ -573,6 +633,31 @@ fn write_json(out: &mut String, value: &Json) {
     }
 }
 
+fn write_int(out: &mut String, n: i64) {
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    if n == i64::MIN {
+        out.push_str("-9223372036854775808");
+        return;
+    }
+    let negative = n < 0;
+    let mut n = n.unsigned_abs();
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    if negative {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    out.push_str(std::str::from_utf8(&buf[i..]).expect("digits"));
+}
+
 fn write_string(out: &mut String, text: &str) {
     out.push('"');
     for ch in text.chars() {
@@ -585,7 +670,11 @@ fn write_string(out: &mut String, text: &str) {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let n = c as u32;
+                out.push_str("\\u00");
+                out.push(HEX[((n >> 4) & 0xf) as usize] as char);
+                out.push(HEX[(n & 0xf) as usize] as char);
             }
             c => out.push(c),
         }
@@ -640,6 +729,30 @@ mod tests {
         let again = parse_json(r#"{"a":1,"a":2}"#).unwrap();
         assert_eq!(obj_i64(again.as_object().unwrap(), "a").unwrap(), 2);
         assert_eq!(to_json(&again), r#"{"a":2}"#);
+    }
+
+    #[test]
+    fn to_json_writes_into_the_buffer_it_reserved() {
+        let value = Json::object(vec![
+            ("secret".to_string(), Json::Str("k".repeat(8_000))),
+            ("n".to_string(), Json::Int(i64::MIN)),
+            ("z".to_string(), Json::Int(0)),
+            ("p".to_string(), Json::Int(10)),
+            ("m".to_string(), Json::Int(-10)),
+            ("c".to_string(), Json::Str("\u{0001}\"\\".to_string())),
+            (
+                "a".to_string(),
+                Json::Arr(vec![Json::Bool(true), Json::Null]),
+            ),
+        ]);
+        let mut out = String::with_capacity(json_len(&value));
+        let reserved = out.capacity();
+        write_json(&mut out, &value);
+        assert_eq!(out.capacity(), reserved);
+        assert_eq!(out.len(), json_len(&value));
+        assert_eq!(out, to_json(&value));
+        assert!(out.contains("-9223372036854775808"));
+        assert!(out.contains("\\u0001"));
     }
 
     #[test]

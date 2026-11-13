@@ -12,7 +12,12 @@ use zeroize::Zeroize;
 #[derive(Clone)]
 enum Source {
     Os,
-    Stream { data: Vec<u8>, pos: usize },
+    // Constructed only by `Rng::stream`, which a normal build does not contain.
+    #[cfg_attr(not(any(test, feature = "test-rng")), allow(dead_code))]
+    Stream {
+        data: Vec<u8>,
+        pos: usize,
+    },
 }
 
 /// A random-byte source. `Debug` does not print the stream.
@@ -42,6 +47,10 @@ impl Rng {
     }
 
     /// A fixed transcript. Draws walk the slice from the start.
+    ///
+    /// Present in tests and when the `test-rng` feature is on. A normal
+    /// build cannot replace the operating-system generator from Rust.
+    #[cfg(any(test, feature = "test-rng"))]
     pub fn stream(data: impl Into<Vec<u8>>) -> Self {
         Self {
             source: Source::Stream {
