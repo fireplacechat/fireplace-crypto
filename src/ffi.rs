@@ -50,6 +50,13 @@ pub struct FpBuf {
     pub len: usize,
 }
 
+#[path = "ffi_session.rs"]
+mod session_handles;
+pub use session_handles::{
+    FpSession, fp_session_decrypt_handle, fp_session_destroy, fp_session_encrypt_handle,
+    fp_session_load, fp_session_save,
+};
+
 #[cfg(feature = "test-rng")]
 struct TestStream {
     data: Vec<u8>,

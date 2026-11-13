@@ -94,6 +94,29 @@ int32_t fp_session_decrypt(const uint8_t *session_json, size_t session_len, cons
 int32_t fp_session_validate(const uint8_t *json, size_t json_len, int32_t *out_ok);
 int32_t fp_session_self_check(const uint8_t *json, size_t json_len, int32_t *out_ok);
 
+/* Live sessions retain the transient failed-chain budget across calls. The
+ * JSON-only decrypt above creates a fresh session (and budget) on each call;
+ * use it for one-shot copies, not an app's ongoing receive loop.
+ *
+ * A handle is owned by the caller: use on one thread at a time, destroy
+ * exactly once, and never access it after destruction. Destroy accepts null
+ * and drops the session, wiping its private state. No handles are global.
+ * Output descriptors must be distinct and cannot alias the handle or inputs.
+ * Save and successful operations return exactly the existing session JSON;
+ * the budget is never persisted. Failed decrypts retain only that budget,
+ * leave ratchet state intact, and return empty output buffers.
+ */
+typedef struct FpSession FpSession;
+int32_t fp_session_load(const uint8_t *json, size_t len, FpSession **out);
+void fp_session_destroy(FpSession *handle);
+int32_t fp_session_save(FpSession *handle, FpBuf *out);
+int32_t fp_session_encrypt_handle(FpSession *handle, const uint8_t *chat, size_t chat_len,
+                                  const uint8_t *plain, size_t plain_len,
+                                  FpBuf *out_session, FpBuf *out_envelope);
+int32_t fp_session_decrypt_handle(FpSession *handle, const uint8_t *envelope, size_t envelope_len,
+                                  const uint8_t *chat, size_t chat_len, const int64_t *now_ms,
+                                  FpBuf *out_session, FpBuf *out_plain);
+
 int32_t fp_recovery_generate(FpBuf *out_key);
 int32_t fp_recovery_display(const uint8_t *key, size_t key_len, FpBuf *out_text);
 int32_t fp_recovery_parse(const uint8_t *text, size_t text_len, FpBuf *out_key);

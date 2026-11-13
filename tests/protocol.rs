@@ -3,6 +3,11 @@
 //! recorded byte stream is byte-for-byte the same, which is what the Dart
 //! export compares against.
 
+use fireplace_crypto::ffi::{
+    FP_BAD_ARG, FP_CRYPTO, FP_OK, FP_RATE_LIMITED, FpBuf, FpSession, fp_free,
+    fp_session_decrypt_handle, fp_session_destroy, fp_session_encrypt_handle, fp_session_load,
+    fp_session_save,
+};
 use fireplace_crypto::{
     AccountIdentity, DeviceKeys, Error, PreKeyBundle, PreKeyRecord, RecoveryKey, Rng, Session,
     link_open, link_seal, one_time, recovery_decrypt, recovery_encrypt, request_fingerprint,
@@ -10,6 +15,198 @@ use fireplace_crypto::{
 };
 
 const NOW: i64 = 1_700_000_000_000;
+
+struct Buffer(FpBuf);
+
+impl Buffer {
+    fn empty() -> Self {
+        Self(FpBuf {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        if self.0.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.0.ptr, self.0.len) }
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        unsafe { fp_free(self.0.ptr, self.0.len) };
+    }
+}
+
+struct Live(*mut FpSession);
+
+impl Live {
+    fn load(json: &str) -> Self {
+        let mut handle = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { fp_session_load(json.as_ptr(), json.len(), &mut handle) },
+            FP_OK
+        );
+        assert!(!handle.is_null());
+        Self(handle)
+    }
+
+    fn save(&self) -> String {
+        let mut out = Buffer::empty();
+        assert_eq!(unsafe { fp_session_save(self.0, &mut out.0) }, FP_OK);
+        String::from_utf8(out.bytes().to_vec()).unwrap()
+    }
+
+    fn decrypt(&self, envelope: &str, now: i64) -> (i32, Buffer, Buffer) {
+        let mut state = Buffer::empty();
+        let mut plain = Buffer::empty();
+        let code = unsafe {
+            fp_session_decrypt_handle(
+                self.0,
+                envelope.as_ptr(),
+                envelope.len(),
+                b"chat-1".as_ptr(),
+                6,
+                &now,
+                &mut state.0,
+                &mut plain.0,
+            )
+        };
+        (code, state, plain)
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        unsafe { fp_session_destroy(self.0) };
+    }
+}
+
+#[test]
+fn live_c_session_keeps_the_failed_chain_budget_without_persisting_it() {
+    let mut rng = Rng::os();
+    let Pair {
+        mut alice, mut bob, ..
+    } = pair(&mut rng);
+    let first = alice.encrypt(b"first", "chat-1", &mut rng).unwrap();
+    bob.decrypt(&first, "chat-1", &mut rng, NOW).unwrap();
+    let held = alice.encrypt(b"held", "chat-1", &mut rng).unwrap();
+    let reply = bob.encrypt(b"reply", "chat-1", &mut rng).unwrap();
+    alice.decrypt(&reply, "chat-1", &mut rng, NOW).unwrap();
+    let fresh = alice.encrypt(b"fresh", "chat-1", &mut rng).unwrap();
+    let mut forged = fresh.clone();
+    forged.mac[0] ^= 1;
+
+    let stored = bob.to_json();
+    let live = Live::load(&stored);
+    assert!(live.save() == stored);
+    for _ in 0..8 {
+        let (code, state, plain) = live.decrypt(&forged.to_json(), NOW);
+        assert_eq!(code, FP_CRYPTO);
+        assert!(state.bytes().is_empty() && plain.bytes().is_empty());
+        assert!(live.save() == stored);
+    }
+    let (code, _, _) = live.decrypt(&forged.to_json(), NOW);
+    assert_eq!(code, FP_RATE_LIMITED);
+    // A separate loaded copy represents an app restart, as in Dart; its
+    // in-memory budget starts empty and neither copy alters the other's.
+    let restarted = Live::load(&live.save());
+    assert_eq!(restarted.decrypt(&forged.to_json(), NOW).0, FP_CRYPTO);
+    assert_eq!(live.decrypt(&forged.to_json(), NOW).0, FP_RATE_LIMITED);
+    // Same-chain messages and cheap replays remain available at the limit.
+    let (code, _, plain) = live.decrypt(&held.to_json(), NOW);
+    assert_eq!(code, FP_OK);
+    assert_eq!(plain.bytes(), b"held");
+    assert_eq!(live.decrypt(&held.to_json(), NOW).0, FP_CRYPTO);
+    assert_eq!(
+        live.decrypt(&fresh.to_json(), NOW + 60_000).0,
+        FP_RATE_LIMITED
+    );
+    assert_eq!(live.decrypt(&forged.to_json(), NOW + 60_001).0, FP_CRYPTO);
+    let (code, _, plain) = live.decrypt(&fresh.to_json(), NOW + 60_001);
+    assert_eq!(code, FP_OK);
+    assert_eq!(plain.bytes(), b"fresh");
+}
+
+#[test]
+fn live_c_encrypt_checks_outputs_before_advancing_and_continues_in_rust() {
+    let mut rng = Rng::os();
+    let Pair { alice, mut bob, .. } = pair(&mut rng);
+    let stored = alice.to_json();
+    let live = Live::load(&stored);
+    let mut state = Buffer::empty();
+    let mut envelope = Buffer::empty();
+    for same_slot in [false, true] {
+        let second = if same_slot {
+            &mut state.0
+        } else {
+            std::ptr::null_mut()
+        };
+        let code = unsafe {
+            fp_session_encrypt_handle(
+                live.0,
+                b"chat-1".as_ptr(),
+                6,
+                b"one".as_ptr(),
+                3,
+                &mut state.0,
+                second,
+            )
+        };
+        assert_eq!(code, FP_BAD_ARG);
+        assert!(live.save() == stored);
+    }
+    let code = unsafe {
+        fp_session_encrypt_handle(
+            live.0,
+            b"chat-1".as_ptr(),
+            6,
+            b"one".as_ptr(),
+            3,
+            &mut state.0,
+            &mut envelope.0,
+        )
+    };
+    assert_eq!(code, FP_OK);
+    let envelope =
+        fireplace_crypto::Envelope::from_json(std::str::from_utf8(envelope.bytes()).unwrap())
+            .unwrap();
+    assert_eq!(
+        bob.decrypt(&envelope, "chat-1", &mut rng, NOW).unwrap(),
+        b"one"
+    );
+    assert!(live.save().as_bytes() == state.bytes());
+    let mut restored = Session::from_json(&live.save()).unwrap();
+    let next = restored.encrypt(b"two", "chat-1", &mut rng).unwrap();
+    assert_eq!(bob.decrypt(&next, "chat-1", &mut rng, NOW).unwrap(), b"two");
+}
+
+#[test]
+fn live_c_session_rejects_bad_arguments_without_allocating_a_handle() {
+    let mut out = std::ptr::null_mut();
+    assert_ne!(
+        unsafe { fp_session_load(b"bad".as_ptr(), 3, &mut out) },
+        FP_OK
+    );
+    assert!(out.is_null());
+    assert_eq!(
+        unsafe { fp_session_load(std::ptr::null(), 1, &mut out) },
+        FP_BAD_ARG
+    );
+    assert_eq!(
+        unsafe { fp_session_load(std::ptr::null(), 0, std::ptr::null_mut()) },
+        FP_BAD_ARG
+    );
+    let mut buffer = Buffer::empty();
+    assert_eq!(
+        unsafe { fp_session_save(std::ptr::null_mut(), &mut buffer.0) },
+        FP_BAD_ARG
+    );
+    assert!(buffer.bytes().is_empty());
+    unsafe { fp_session_destroy(std::ptr::null_mut()) };
+}
 
 #[test]
 fn handshake_ratchet_skip_and_replay() {
