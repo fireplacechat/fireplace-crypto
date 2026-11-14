@@ -1,0 +1,15 @@
+[package]
+name = "fireplace-mls-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Measurement spike for MLS group chats (mobile decision 0050). Not shipped."
+license = "AGPL-3.0-only"
+
+[dependencies]
+openmls = { version = "=0.9.2", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = { version = "=0.6.0" }
+
+[workspace]
