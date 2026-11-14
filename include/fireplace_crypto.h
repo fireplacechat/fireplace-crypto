@@ -106,6 +106,21 @@ int32_t fp_session_self_check(const uint8_t *json, size_t json_len, int32_t *out
  * the budget is never persisted. Failed decrypts retain only that budget,
  * leave ratchet state intact, and return empty output buffers.
  */
+/* Group chats: compiled only with the Cargo feature groups. Define
+ * FP_GROUPS when the library was built with it. One handle is one device's
+ * MLS store. fp_group_open takes the saved records (len 0 for a new device)
+ * as a length-prefixed list key, value, key, value; fp_group_records returns
+ * the same form. fp_group_call takes a JSON request {"op": ...} and returns
+ * JSON. A changing request returns "changes" and stays open until the
+ * request {"op":"accept"} or {"op":"rollback"}; see src/group/mod.rs. */
+#ifdef FP_GROUPS
+typedef struct FpGroups FpGroups;
+int32_t fp_group_open(const uint8_t *records, size_t len, FpGroups **out);
+void fp_group_destroy(FpGroups *handle);
+int32_t fp_group_records(FpGroups *handle, FpBuf *out);
+int32_t fp_group_call(FpGroups *handle, const uint8_t *request, size_t len, FpBuf *out);
+#endif
+
 typedef struct FpSession FpSession;
 int32_t fp_session_load(const uint8_t *json, size_t len, FpSession **out);
 void fp_session_destroy(FpSession *handle);

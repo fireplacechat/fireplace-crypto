@@ -24,9 +24,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo clippy --locked --all-targets --features test-rng -- -D warnings
+      - run: cargo clippy --locked --all-targets --features groups,test-rng -- -D warnings
       # FP_REQUIRE_VECTORS makes a missing tests/vectors directory fail this job.
       # A packaged crate has no such directory, so its own tests skip instead.
       - run: cargo test --locked --all-targets --features test-rng
+      - run: cargo test --locked --all-targets --features groups,test-rng
         env:
           FP_REQUIRE_VECTORS: "1"
       # The feature is off here. The test stream must not be in the release library.

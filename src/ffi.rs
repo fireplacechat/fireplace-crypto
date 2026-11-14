@@ -50,6 +50,14 @@ pub struct FpBuf {
     pub len: usize,
 }
 
+#[cfg(feature = "groups")]
+#[path = "ffi_group.rs"]
+mod group_handles;
+#[cfg(feature = "groups")]
+pub use group_handles::{
+    FpGroups, fp_group_call, fp_group_destroy, fp_group_open, fp_group_records,
+};
+
 #[path = "ffi_session.rs"]
 mod session_handles;
 pub use session_handles::{

@@ -12,6 +12,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "MIT",
+    # hpke-rs (HPKE for OpenMLS, feature `groups`, mobile decision 0050).
+    # File-level copyleft, compatible with AGPL-3.0. Needs the owner's approval.
+    "MPL-2.0",
     "Unicode-3.0",
 ]
 confidence-threshold = 0.8

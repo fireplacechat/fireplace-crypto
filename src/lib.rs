@@ -12,6 +12,8 @@ mod device;
 mod error;
 pub mod ffi;
 mod fingerprint;
+#[cfg(feature = "groups")]
+pub mod group;
 mod identity;
 mod kdf;
 mod link;
