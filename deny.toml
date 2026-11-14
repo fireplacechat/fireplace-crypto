@@ -3,6 +3,16 @@
 [advisories]
 version = 2
 yanked = "deny"
+# The same advisories as .cargo/audit.toml, for the same reasons
+# (docs/dependencies.md, "Open advisories").
+ignore = [
+    { id = "RUSTSEC-2026-0329", reason = "libcrux-hmac-drbg is in Cargo.lock only; never compiled" },
+    { id = "RUSTSEC-2026-0330", reason = "libcrux-kem is in Cargo.lock only; never compiled" },
+    { id = "RUSTSEC-2026-0331", reason = "libcrux-kem is in Cargo.lock only; never compiled" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys is in Cargo.lock only; never compiled" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 is linked through p256 for MLS suites this crate refuses; no fixed version fits OpenMLS 0.9.2" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is a build-time macro of hax-lib; unmaintained, no fix available" },
+]
 
 [licenses]
 version = 2

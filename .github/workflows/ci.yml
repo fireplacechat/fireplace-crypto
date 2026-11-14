@@ -42,6 +42,17 @@ jobs:
             exit 1
           fi
           nm -D "$so" | grep -q fp_free
+      # Four advisories are ignored because their crates are in Cargo.lock but
+      # never compiled (docs/dependencies.md). If one becomes part of the
+      # build, the advisory applies and this fails.
+      - name: crates with ignored advisories are not built
+        run: |
+          for crate in libcrux-hmac-drbg libcrux-kem libsqlite3-sys; do
+            if cargo tree --locked --features groups,test-rng --target all -e all -i "$crate" 2>/dev/null | grep -q "^$crate "; then
+              echo "$crate is now built: its advisory applies. See docs/dependencies.md."
+              exit 1
+            fi
+          done
       # CI-only. Not a library dependency. Versions are pinned.
       - run: cargo install cargo-audit --version 0.23.0 --locked
       - run: cargo audit
