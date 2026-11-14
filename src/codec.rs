@@ -100,6 +100,22 @@ pub fn b64url_encode(data: &[u8]) -> String {
         .replace('=', "")
 }
 
+/// Decodes [`b64url_encode`]'s form. Anything that does not re-encode to the
+/// same text (padding, `+`, `/`, stray bits) is refused, so each value has one
+/// spelling.
+#[cfg_attr(not(feature = "groups"), allow(dead_code))]
+pub fn b64url_decode(text: &str) -> Result<Vec<u8>> {
+    let mut padded = text.replace('-', "+").replace('_', "/");
+    while !padded.len().is_multiple_of(4) {
+        padded.push('=');
+    }
+    let bytes = b64_decode(&padded)?;
+    if b64url_encode(&bytes) != text {
+        return Err(Error::Invalid("base64url"));
+    }
+    Ok(bytes)
+}
+
 /// Length-prefixed concatenation. Each part is a big-endian `u32` length then
 /// the bytes, matching `lp` in the Dart codec.
 pub fn lp(parts: &[&[u8]]) -> Result<Vec<u8>> {
@@ -707,6 +723,10 @@ mod tests {
         assert_eq!(b64_decode("aGVsbG8=").unwrap(), b"hello");
         assert!(b64_decode("aGVsbG8").is_err());
         assert_eq!(b64url_encode(&[0xfb, 0xff, 0x00]), "-_8A");
+        assert_eq!(b64url_decode("-_8A").unwrap(), [0xfb, 0xff, 0x00]);
+        for bad in ["+/8A", "-_8A==", "-_9", "a"] {
+            assert!(b64url_decode(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

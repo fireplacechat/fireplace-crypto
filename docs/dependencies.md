@@ -9,8 +9,40 @@ No `hazmat` feature is enabled. JSON and base64 are implemented in this
 crate. There is no `serde`, `serde_json`, or `base64` dependency, and the
 C header is written by hand.
 
-`cargo audit` on this lockfile reports no vulnerabilities. `cargo deny check`
-accepts the licences below.
+Without the `groups` feature, `cargo audit` on this lockfile reports no
+vulnerabilities that apply. With it, five advisories are reported and ignored,
+for the reasons under *Open advisories*. `cargo deny check` accepts the licences
+below.
+
+## Open advisories
+
+OpenMLS 0.9.2 and its companion crates (feature `groups`) bring a large tree.
+`cargo audit` and `cargo deny` read `Cargo.lock`, which lists every crate any
+feature of any dependency could use, built or not. The ignore lists are in
+`.cargo/audit.toml` and `deny.toml`.
+
+| Advisory | Crate | Why it does not apply | What removes it |
+|---|---|---|---|
+| RUSTSEC-2026-0329 | libcrux-hmac-drbg 0.0.1 | Not compiled: an optional dependency this crate does not enable | Any OpenMLS release that drops or updates it |
+| RUSTSEC-2026-0330, -0331 | libcrux-kem 0.0.9 | Not compiled, for the same reason. The KEM this crate uses with MLS comes from the RustCrypto backend | The same |
+| RUSTSEC-2026-0459 | libsqlite3-sys 0.35.0 | Not compiled: OpenMLS's SQLite storage is not used; the app stores the records | The same |
+| RUSTSEC-2026-0387 | crypto-bigint 0.5.5 | **Compiled, not run.** See below | OpenMLS's backend moving to `elliptic-curve` 0.14 (crypto-bigint 0.7.6 or later) |
+| RUSTSEC-2026-0173 | proc-macro-error2 2.0.1 | A build-time macro (through `hax-lib`); unmaintained, not a vulnerability | A replacement upstream |
+
+CI proves the first four stay out of the build: `cargo tree -i` must find no
+path to those crates with every feature this repository uses, on every target.
+
+**crypto-bigint 0.5.5** has timing differences in operations meant to be constant
+time. It is linked through `p256` (and `elliptic-curve` 0.13), which OpenMLS's
+RustCrypto backend and basic credential include for the NIST P-256 suites. This
+crate uses one suite, `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519`: X25519
+and ML-KEM-768 for key exchange, Ed25519 for signatures. It creates groups and key
+packages with that suite only and refuses a Welcome for any other
+(`src/group/mod.rs`), so no P-256 key is ever generated, used or accepted, and
+the affected code is not reached with a secret. The fixed crypto-bigint (0.7.6)
+needs `elliptic-curve` 0.14, which OpenMLS 0.9.2's crates do not accept, so it
+cannot be selected from here. Revisit when a newer OpenMLS is released; that
+release is also needed for the final cipher suite identifiers.
 
 ## Direct crates
 

@@ -24,9 +24,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo clippy --locked --all-targets --features test-rng -- -D warnings
+      - run: cargo clippy --locked --all-targets --features groups,test-rng -- -D warnings
       # FP_REQUIRE_VECTORS makes a missing tests/vectors directory fail this job.
       # A packaged crate has no such directory, so its own tests skip instead.
       - run: cargo test --locked --all-targets --features test-rng
+      - run: cargo test --locked --all-targets --features groups,test-rng
         env:
           FP_REQUIRE_VECTORS: "1"
       # The feature is off here. The test stream must not be in the release library.
@@ -40,6 +42,17 @@ jobs:
             exit 1
           fi
           nm -D "$so" | grep -q fp_free
+      # Four advisories are ignored because their crates are in Cargo.lock but
+      # never compiled (docs/dependencies.md). If one becomes part of the
+      # build, the advisory applies and this fails.
+      - name: crates with ignored advisories are not built
+        run: |
+          for crate in libcrux-hmac-drbg libcrux-kem libsqlite3-sys; do
+            if cargo tree --locked --features groups,test-rng --target all -e all -i "$crate" 2>/dev/null | grep -q "^$crate "; then
+              echo "$crate is now built: its advisory applies. See docs/dependencies.md."
+              exit 1
+            fi
+          done
       # CI-only. Not a library dependency. Versions are pinned.
       - run: cargo install cargo-audit --version 0.23.0 --locked
       - run: cargo audit
