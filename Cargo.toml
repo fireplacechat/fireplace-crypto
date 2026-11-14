@@ -7,7 +7,7 @@ description = "Fireplace end-to-end encryption: identities, prekeys, handshake a
 license = "AGPL-3.0-only"
 repository = "https://github.com/fireplacechat/fireplace-crypto"
 readme = "README.md"
-exclude = ["/tests", "/.github", "/target"]
+exclude = ["/tests", "/.github", "/target", "/spikes"]
 
 [lib]
 name = "fireplace_crypto"
