@@ -308,29 +308,6 @@ fn applying_the_changes_reproduces_the_store() {
 }
 
 #[test]
-fn bad_requests_are_refused() {
-    let (mut alice, _, _) = book_club();
-    for bad in [
-        r#"{"op":"nope"}"#.to_string(),
-        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":""}}"#,
-            b64url_encode(&[9; 16])
-        ),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
-            b64url_encode(&[9; 16]),
-            "x".repeat(41)
-        ),
-        r#"{"op":"key_packages","count":11}"#.to_string(),
-        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
-    ] {
-        assert!(alice.raw(&bad).is_err(), "{bad}");
-        assert!(alice.store.accept().is_err());
-    }
-}
-
-#[test]
 fn joining_reports_the_inviter_and_can_be_held_to_one_group() {
     let (a, b, c) = (identity(), identity(), identity());
     let mut alice = phone(&a, "alice", "alice-phone");
@@ -376,4 +353,27 @@ fn joining_reports_the_inviter_and_can_be_held_to_one_group() {
     bob.change(&format!(r#"{{"op":"merge_pending","gid":"{GID}"}}"#));
     let joined = carol.join(&s(&out, "welcome"));
     assert_eq!(s(field(&joined, "inviter"), "uid"), "bob");
+}
+
+#[test]
+fn bad_requests_are_refused() {
+    let (mut alice, _, _) = book_club();
+    for bad in [
+        r#"{"op":"nope"}"#.to_string(),
+        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":""}}"#,
+            b64url_encode(&[9; 16])
+        ),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
+            b64url_encode(&[9; 16]),
+            "x".repeat(41)
+        ),
+        r#"{"op":"key_packages","count":11}"#.to_string(),
+        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
+    ] {
+        assert!(alice.raw(&bad).is_err(), "{bad}");
+        assert!(alice.store.accept().is_err());
+    }
 }
