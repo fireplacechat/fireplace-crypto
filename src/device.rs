@@ -71,19 +71,38 @@ impl DeviceBundle {
         let device_id = obj_str(obj, "deviceId")
             .map_err(|_| Error::Invalid("deviceId"))?
             .to_string();
-        if uid.is_empty() || device_id.is_empty() {
-            return Err(Error::Invalid("device"));
-        }
-        Ok(Self {
+        let bundle = Self {
             uid,
             device_id,
             x25519_pub: b64_exact(obj, "x25519Pub", 32)?,
             kem_pub: b64_exact(obj, "kemPub", MLKEM_EK)?,
-            identity_pub: b64_any(obj, "identityPub")?,
-            cert: b64_any(obj, "cert")?,
-        })
+            identity_pub: b64_bounded(obj, "identityPub", MAX_IDENTITY_PUB)?,
+            cert: b64_bounded(obj, "cert", MAX_CERT)?,
+        };
+        bundle.check_ids()?;
+        Ok(bundle)
+    }
+
+    /// The limits a saved session puts on the two ids, applied before a
+    /// session is made from this bundle, so that every session that can be
+    /// created can also be loaded again.
+    pub(crate) fn check_ids(&self) -> Result<()> {
+        if self.uid.is_empty() || self.uid.len() > MAX_UID {
+            return Err(Error::Invalid("uid"));
+        }
+        if !valid_device_id(&self.device_id) {
+            return Err(Error::Invalid("deviceId"));
+        }
+        Ok(())
     }
 }
+
+/// Longest account id, in bytes. The same limit as in a saved session.
+pub(crate) const MAX_UID: usize = 128;
+/// An account identity key is 1,992 bytes and a certificate 3,381. The limits
+/// leave room and still keep a hostile record small.
+const MAX_IDENTITY_PUB: usize = 4096;
+const MAX_CERT: usize = 8192;
 
 pub struct DeviceKeys {
     pub device_id: String,
@@ -218,7 +237,14 @@ pub(crate) fn b64_exact(obj: &[(String, Json)], key: &'static str, len: usize) -
     Ok(bytes)
 }
 
-pub(crate) fn b64_any(obj: &[(String, Json)], key: &'static str) -> Result<Vec<u8>> {
+fn b64_bounded(obj: &[(String, Json)], key: &'static str, max: usize) -> Result<Vec<u8>> {
     let text = obj_str(obj, key).map_err(|_| Error::Invalid(key))?;
-    b64_decode(text).map_err(|_| Error::Invalid(key))
+    if text.len() > max * 2 {
+        return Err(Error::Invalid(key));
+    }
+    let bytes = b64_decode(text).map_err(|_| Error::Invalid(key))?;
+    if bytes.len() > max {
+        return Err(Error::Invalid(key));
+    }
+    Ok(bytes)
 }
