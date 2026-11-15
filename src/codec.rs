@@ -133,12 +133,14 @@ pub fn unlp(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut parts = Vec::new();
     let mut i = 0;
     while i < data.len() {
-        if i + 4 > data.len() {
+        // Compare with what is left. `i + len` could pass `usize::MAX` where
+        // `usize` is 32 bits, and wrap in a release build.
+        if data.len() - i < 4 {
             return Err(Error::Invalid("truncated length"));
         }
         let len = u32::from_be_bytes(data[i..i + 4].try_into().expect("4 bytes")) as usize;
         i += 4;
-        if i + len > data.len() {
+        if len > data.len() - i {
             return Err(Error::Invalid("truncated field"));
         }
         parts.push(data[i..i + len].to_vec());
@@ -746,6 +748,27 @@ mod tests {
             vec![b"ab".to_vec(), Vec::<u8>::new(), b"cde".to_vec()]
         );
         assert!(unlp(&[0, 0, 0, 2, 1]).is_err());
+    }
+
+    #[test]
+    fn a_length_larger_than_the_rest_is_refused() {
+        // The largest length, after one empty field: on a 32-bit target the
+        // old sum `i + len` wrapped past zero here.
+        assert!(unlp(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]).is_err());
+        assert!(unlp(&[0xff, 0xff, 0xff, 0xff]).is_err());
+        assert!(unlp(&[0xff, 0xff, 0xff, 0xfc, 1, 2, 3, 4]).is_err());
+        // Fewer than four bytes where a length should be.
+        for cut in 1..4 {
+            assert!(unlp(&[0, 0, 0, 0][..cut]).is_err());
+        }
+        // Every truncation of a valid encoding is refused or is a shorter list.
+        let whole = lp(&[b"ab", b"", b"cde"]).unwrap();
+        for cut in 0..whole.len() {
+            if let Ok(parts) = unlp(&whole[..cut]) {
+                let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+                assert_eq!(lp(&refs).unwrap(), &whole[..cut]);
+            }
+        }
     }
 
     #[test]
