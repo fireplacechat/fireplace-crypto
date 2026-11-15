@@ -329,3 +329,77 @@ fn bad_requests_are_refused() {
         assert!(alice.store.accept().is_err());
     }
 }
+
+#[test]
+fn an_add_names_the_account_and_can_be_held_to_an_expected_one() {
+    let (a, b, other) = (identity(), identity(), identity());
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    let mut bob1 = phone(&b, "bob", "bob-phone");
+    let mut bob2 = phone(&b, "bob", "bob-tablet");
+    let packages = [bob1.packages(1), bob2.packages(1)].concat();
+    let list = format!("\"{}\",\"{}\"", packages[0], packages[1]);
+    let bob_identity = b64_encode(&b.public_bytes().unwrap());
+
+    // The result names each device before anything is merged or sent.
+    let out = alice
+        .raw(&format!(
+            r#"{{"op":"commit_add","gid":"{GID}","keyPackages":[{list}],"uid":"bob","identity":"{bob_identity}"}}"#
+        ))
+        .unwrap();
+    let added = field(&out, "added").as_array().unwrap();
+    assert_eq!(added.len(), 2);
+    assert_eq!(s(&added[0], "uid"), "bob");
+    assert_eq!(s(&added[0], "device"), "bob-phone");
+    assert_eq!(s(&added[1], "device"), "bob-tablet");
+    assert_eq!(s(&added[0], "identity"), bob_identity);
+    alice.store.rollback().unwrap();
+
+    // A different expected account, or the right account under another
+    // identity key, is refused and changes nothing.
+    let before = alice.info();
+    let other_identity = b64_encode(&other.public_bytes().unwrap());
+    for expected in [
+        format!(r#""uid":"carol","identity":"{bob_identity}""#),
+        format!(r#""uid":"bob","identity":"{other_identity}""#),
+        r#""uid":"carol""#.to_string(),
+        format!(r#""identity":"{other_identity}""#),
+    ] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_add","gid":"{GID}","keyPackages":[{list}],{expected}}}"#
+                ))
+                .is_err(),
+            "{expected}"
+        );
+        assert_eq!(alice.info(), before);
+        assert!(alice.store.accept().is_err());
+    }
+}
+
+#[test]
+fn one_add_is_one_account() {
+    let (a, b, c) = (identity(), identity(), identity());
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    let mut bob = phone(&b, "bob", "bob-phone");
+    let mut carol = phone(&c, "carol", "carol-phone");
+    // The same account id under a second identity key is a second account.
+    let mut bob_again = phone(&c, "bob", "bob-tablet");
+    let bob_kp = bob.packages(1).remove(0);
+    for second in [carol.packages(1).remove(0), bob_again.packages(1).remove(0)] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_add","gid":"{GID}","keyPackages":["{bob_kp}","{second}"]}}"#
+                ))
+                .is_err()
+        );
+        assert!(alice.store.accept().is_err());
+    }
+}
