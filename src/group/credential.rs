@@ -205,11 +205,15 @@ impl VerifiedMember {
     }
 
     /// A device that is not in the tree yet, so it has no leaf to report.
+    /// Everything else a member carries is here, so the caller can check a
+    /// key package as fully before adding it as it could afterwards.
     pub fn account_json(&self) -> Json {
         Json::object(vec![
             ("uid".into(), Json::Str(self.uid.clone())),
             ("device".into(), Json::Str(self.device.clone())),
             ("identity".into(), Json::Str(b64_encode(&self.identity))),
+            ("certHash".into(), Json::Str(b64_encode(&self.cert_hash))),
+            ("generation".into(), Json::Int(self.generation)),
         ])
     }
 

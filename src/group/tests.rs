@@ -244,6 +244,11 @@ fn an_add_names_the_account_and_can_be_held_to_an_expected_one() {
     assert_eq!(s(&added[0], "device"), "bob-phone");
     assert_eq!(s(&added[1], "device"), "bob-tablet");
     assert_eq!(s(&added[0], "identity"), bob_identity);
+    // The same signed fields a member carries, before the device is one.
+    for device in added {
+        assert_eq!(s(device, "certHash"), b64_encode(&[7u8; 32]));
+        assert_eq!(field(device, "generation").as_i64().unwrap(), 1);
+    }
     alice.store.rollback().unwrap();
 
     // A different expected account, or the right account under another
