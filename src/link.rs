@@ -86,12 +86,13 @@ fn info(
     ])
 }
 
-fn key(dh: &[u8], shared: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+fn key(dh: &[u8], shared: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     if !prim::contributory(dh) {
         return Err(Error::Crypto("Invalid device linking key."));
     }
-    let mut out = [0u8; 32];
-    hkdf_sha256(&concat(&[dh, shared]), b"", info, &mut out)?;
+    let mut out = Zeroizing::new([0u8; 32]);
+    let ikm = Zeroizing::new(concat(&[dh, shared]));
+    hkdf_sha256(&ikm, b"", info, &mut out[..])?;
     Ok(out)
 }
 
@@ -109,14 +110,18 @@ pub fn seal(
     }
     let mut seed = rng.array::<32>()?;
     let ek = prim::x25519_public(&seed)?.to_vec();
-    let dh = prim::x25519_shared(&seed, x25519_pub)?;
+    let dh = prim::x25519_shared(&seed, x25519_pub).map(Zeroizing::new);
     seed.zeroize();
-    let coins = rng.array::<32>()?;
-    let (kem_ct, shared) = prim::mlkem_encapsulate(kem_pub, &coins)?;
+    let dh = dh?;
+    let coins = Zeroizing::new(rng.array::<32>()?);
+    let (kem_ct, shared) = prim::mlkem_encapsulate(kem_pub, &coins[..])?;
+    let shared = Zeroizing::new(shared);
     let info = info(uid, device_id, &ek, &kem_ct, x25519_pub, kem_pub)?;
-    let plain = identity.to_json().into_bytes();
+    // The plaintext is every secret key of the account: wipe it when done.
+    let plain = Zeroizing::new(identity.to_json().into_bytes());
     let nonce = rng.array::<12>()?;
-    let (ct, mac) = aead::seal(&key(&dh, &shared, &info)?, &nonce, &info, &plain)
+    let sealing = key(&dh[..], &shared[..], &info)?;
+    let (ct, mac) = aead::seal(&sealing[..], &nonce, &info, &plain)
         .map_err(|_| Error::Crypto("Invalid device linking key."))?;
     Ok(SealedIdentity {
         ek,
@@ -129,8 +134,8 @@ pub fn seal(
 
 pub fn open(sealed: &SealedIdentity, uid: &str, keys: &DeviceKeys) -> Result<AccountIdentity> {
     let opened = (|| {
-        let dh = prim::x25519_shared(&keys.x25519_seed, &sealed.ek)?;
-        let shared = prim::mlkem_decapsulate(&keys.kem_secret, &sealed.kem_ct)?;
+        let dh = Zeroizing::new(prim::x25519_shared(&keys.x25519_seed, &sealed.ek)?);
+        let shared = Zeroizing::new(prim::mlkem_decapsulate(&keys.kem_secret, &sealed.kem_ct)?);
         let info = info(
             uid,
             &keys.device_id,
@@ -139,17 +144,18 @@ pub fn open(sealed: &SealedIdentity, uid: &str, keys: &DeviceKeys) -> Result<Acc
             &keys.x25519_pub,
             &keys.kem_pub,
         )?;
-        let plain = aead::open(
-            &key(&dh, &shared, &info)?,
+        let opening = key(&dh[..], &shared[..], &info)?;
+        let plain = Zeroizing::new(aead::open(
+            &opening[..],
             &sealed.nonce,
             &info,
             &sealed.ct,
             &sealed.mac,
-        )?;
+        )?);
         let text = core::str::from_utf8(&plain).map_err(|_| Error::Invalid("link"))?;
         AccountIdentity::from_json(text)
     })();
     opened.map_err(|_| Error::Crypto("Could not decrypt the transferred identity."))
 }
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
