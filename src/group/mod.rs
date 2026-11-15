@@ -146,7 +146,8 @@ impl GroupStore {
         let uid = obj_str(obj, "uid")?;
         let device = obj_str(obj, "device")?;
         let cert_hash = b64_decode(obj_str(obj, "deviceCertHash")?)?;
-        let generation = crate::codec::obj_i64(obj, "generation")?;
+        let generation = u64::try_from(crate::codec::obj_i64(obj, "generation")?)
+            .map_err(|_| Error::Invalid("generation"))?;
         let signer = SignatureKeyPair::new(SUITE.signature_algorithm())
             .map_err(|_| Error::Crypto("signature key"))?;
         let mut rng = Rng::os();
@@ -156,7 +157,7 @@ impl GroupStore {
             device,
             &cert_hash,
             signer.public(),
-            generation as u64,
+            generation,
             &mut rng,
         )?;
         signer
