@@ -329,3 +329,51 @@ fn bad_requests_are_refused() {
         assert!(alice.store.accept().is_err());
     }
 }
+
+#[test]
+fn joining_reports_the_inviter_and_can_be_held_to_one_group() {
+    let (a, b, c) = (identity(), identity(), identity());
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    let mut bob = phone(&b, "bob", "bob-phone");
+    let (commit, welcome) = alice.add(&bob.packages(1));
+    let _ = commit;
+
+    // A Welcome for a group other than the one named is refused, and the key
+    // package it was for is still there afterwards.
+    let other = b64url_encode(&[9u8; 16]);
+    let before = bob.store.records();
+    assert!(
+        bob.raw(&format!(
+            r#"{{"op":"join","welcome":"{welcome}","gid":"{other}"}}"#
+        ))
+        .is_err()
+    );
+    assert_eq!(bob.store.records(), before);
+    assert!(bob.store.accept().is_err());
+
+    let joined = bob.change(&format!(
+        r#"{{"op":"join","welcome":"{welcome}","gid":"{GID}"}}"#
+    ));
+    assert_eq!(s(&joined, "gid"), GID);
+    let inviter = field(&joined, "inviter");
+    assert_eq!(s(inviter, "uid"), "alice");
+    assert_eq!(s(inviter, "device"), "alice-phone");
+    assert_eq!(
+        s(inviter, "identity"),
+        b64_encode(&a.public_bytes().unwrap())
+    );
+
+    // The inviter is whoever made the Welcome, not the group's first member:
+    // Bob invites Carol.
+    let mut carol = phone(&c, "carol", "carol-phone");
+    let list = format!("\"{}\"", carol.packages(1)[0]);
+    let out = bob.change(&format!(
+        r#"{{"op":"commit_add","gid":"{GID}","keyPackages":[{list}]}}"#
+    ));
+    bob.change(&format!(r#"{{"op":"merge_pending","gid":"{GID}"}}"#));
+    let joined = carol.join(&s(&out, "welcome"));
+    assert_eq!(s(field(&joined, "inviter"), "uid"), "bob");
+}

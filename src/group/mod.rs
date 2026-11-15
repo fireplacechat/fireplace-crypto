@@ -270,6 +270,9 @@ impl GroupStore {
         self.describe(&group)
     }
 
+    /// Joins from a Welcome. The result has `inviter`: the member whose leaf
+    /// signed the Welcome. With `gid` in the request, a Welcome for any other
+    /// group is refused and nothing changes.
     fn join(&mut self, obj: &[(String, Json)]) -> Result<Json> {
         let bytes = b64_decode(obj_str(obj, "welcome")?)?;
         let message = MlsMessageIn::tls_deserialize_exact(&bytes[..])
@@ -277,22 +280,38 @@ impl GroupStore {
         let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
             return Err(Error::Invalid("welcome"));
         };
-        let group = StagedWelcome::new_from_welcome(
+        let staged = StagedWelcome::new_from_welcome(
             &self.provider,
             Self::config().join_config(),
             welcome,
             None,
         )
-        .map_err(|_| Error::Crypto("welcome"))?
-        .into_group(&self.provider)
         .map_err(|_| Error::Crypto("welcome"))?;
+        // The group the caller means to join, when it says so.
+        if obj_opt(obj, "gid").is_some() && staged.group_context().group_id() != &gid(obj)? {
+            return Err(Error::Crypto("a welcome for another group"));
+        }
+        // The member whose leaf signed the Welcome.
+        let inviter = staged.welcome_sender_index().u32();
+        let group = staged
+            .into_group(&self.provider)
+            .map_err(|_| Error::Crypto("welcome"))?;
         if group.ciphersuite() != SUITE {
             return Err(Error::Crypto("suite"));
         }
         // Every member must carry a valid Fireplace credential for its leaf key.
-        roster(&group)?;
+        let members = roster(&group)?;
+        let inviter = members
+            .iter()
+            .find(|m| m.leaf == inviter)
+            .ok_or(Error::Crypto("welcome sender"))?
+            .to_json();
         self.remember(group.group_id(), true)?;
-        self.describe(&group)
+        let mut result = self.describe(&group)?;
+        if let Json::Obj(pairs) = &mut result {
+            pairs.push(("inviter".into(), inviter));
+        }
+        Ok(result)
     }
 
     fn encrypt(&mut self, obj: &[(String, Json)]) -> Result<Json> {
