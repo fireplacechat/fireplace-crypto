@@ -329,3 +329,30 @@ fn bad_requests_are_refused() {
         assert!(alice.store.accept().is_err());
     }
 }
+
+fn device_request(id: &AccountIdentity, uid: &str, device: &str) -> String {
+    format!(
+        r#"{{"op":"device","identity":{},"uid":"{uid}","device":"{device}","deviceCertHash":"{}","generation":2}}"#,
+        to_json(&Json::Str(id.to_json())),
+        b64_encode(&[7u8; 32]),
+    )
+}
+
+#[test]
+fn the_device_is_not_replaced_while_it_is_in_a_group() {
+    let (mut alice, mut bob1, _) = book_club();
+    let b = identity();
+    let before = bob1.store.records();
+    assert!(bob1.raw(&device_request(&b, "bob", "bob-phone")).is_err());
+    assert_eq!(bob1.store.records(), before);
+    assert!(bob1.store.accept().is_err());
+    // So what it sends is still signed with the key its leaf has.
+    let ct = bob1.send("still me");
+    assert_eq!(text(&alice.receive(&ct)), "still me");
+
+    // Before any group, and after the last one is forgotten, it may be replaced.
+    let mut fresh = phone(&b, "bob", "bob-watch");
+    fresh.change(&device_request(&b, "bob", "bob-watch"));
+    bob1.change(&format!(r#"{{"op":"forget","gid":"{GID}"}}"#));
+    bob1.change(&device_request(&b, "bob", "bob-phone"));
+}

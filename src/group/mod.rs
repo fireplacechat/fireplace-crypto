@@ -141,7 +141,14 @@ impl GroupStore {
     // ---- the device
 
     /// Creates (or replaces) this device's MLS signing key and Fireplace credential.
+    ///
+    /// Refused while the store holds a group. Each group's leaf is for the
+    /// signing key in use when the device joined; a new key here would sign
+    /// messages that no other member can verify.
     fn device(&mut self, obj: &[(String, Json)]) -> Result<Json> {
+        if !self.known()?.is_empty() {
+            return Err(Error::Invalid("the device is already in a group"));
+        }
         let identity = AccountIdentity::from_json(obj_str(obj, "identity")?)?;
         let uid = obj_str(obj, "uid")?;
         let device = obj_str(obj, "device")?;
