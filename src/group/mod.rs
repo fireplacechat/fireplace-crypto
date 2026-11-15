@@ -32,6 +32,8 @@ pub const SUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA
 /// Group-context extension carrying the encrypted name and administrators.
 const META_EXTENSION: u16 = 0xF0F1;
 const MAX_NAME_CHARS: usize = 40;
+/// Most administrators one group may name. Far above any real group.
+const MAX_ADMINS: usize = 64;
 const MAX_KEY_PACKAGES: i64 = 10;
 /// Longest input the store accepts in one call.
 pub const MAX_INPUT: usize = 4 << 20;
@@ -141,12 +143,20 @@ impl GroupStore {
     // ---- the device
 
     /// Creates (or replaces) this device's MLS signing key and Fireplace credential.
+    ///
+    /// Refused while the store holds a group. Each group's leaf is for the
+    /// signing key in use when the device joined; a new key here would sign
+    /// messages that no other member can verify.
     fn device(&mut self, obj: &[(String, Json)]) -> Result<Json> {
+        if !self.known()?.is_empty() {
+            return Err(Error::Invalid("the device is already in a group"));
+        }
         let identity = AccountIdentity::from_json(obj_str(obj, "identity")?)?;
         let uid = obj_str(obj, "uid")?;
         let device = obj_str(obj, "device")?;
         let cert_hash = b64_decode(obj_str(obj, "deviceCertHash")?)?;
-        let generation = crate::codec::obj_i64(obj, "generation")?;
+        let generation = u64::try_from(crate::codec::obj_i64(obj, "generation")?)
+            .map_err(|_| Error::Invalid("generation"))?;
         let signer = SignatureKeyPair::new(SUITE.signature_algorithm())
             .map_err(|_| Error::Crypto("signature key"))?;
         let mut rng = Rng::os();
@@ -156,7 +166,7 @@ impl GroupStore {
             device,
             &cert_hash,
             signer.public(),
-            generation as u64,
+            generation,
             &mut rng,
         )?;
         signer
@@ -379,16 +389,33 @@ impl GroupStore {
 
     /// A Commit by this device. It stays pending until the app knows whether the
     /// server took it (`merge_pending`) or another Commit won (`discard_pending`).
+    ///
+    /// `commit_add` adds the devices of one account. Its result lists them in
+    /// `added` (account id, device id and account identity key of each key
+    /// package, in the order given) so the app can compare them with the account
+    /// it means to add before it saves or sends anything. The request may carry
+    /// `uid` and `identity` (base64); every key package must then be for that
+    /// account under that identity key, or the call fails.
     fn commit(&mut self, obj: &[(String, Json)], kind: Commit) -> Result<Json> {
         let mut group = self.load(&gid(obj)?)?;
         let (signer, _) = self.signer()?;
         let mut welcome = None;
+        let mut adding: Vec<VerifiedMember> = Vec::new();
         let commit = match kind {
             Commit::Update => group
                 .self_update(&self.provider, &signer, LeafNodeParameters::default())
                 .map_err(|_| Error::Crypto("update"))?
                 .into_commit(),
             Commit::Add => {
+                // The account the caller means to add, when it says so.
+                let want_uid = match obj_opt(obj, "uid") {
+                    Some(uid) => Some(uid.as_str()?),
+                    None => None,
+                };
+                let want_identity = match obj_opt(obj, "identity") {
+                    Some(identity) => Some(b64_decode(identity.as_str()?)?),
+                    None => None,
+                };
                 let mut packages = Vec::new();
                 for p in obj_get(obj, "keyPackages")?.as_array()? {
                     let bytes = b64_decode(p.as_str()?)?;
@@ -397,11 +424,28 @@ impl GroupStore {
                         .validate(self.provider.crypto(), ProtocolVersion::Mls10)
                         .map_err(|_| Error::Crypto("key package"))?;
                     // Check the Fireplace credential before adding anybody.
-                    VerifiedMember::check(
+                    let member = VerifiedMember::check(
                         kp.leaf_node().credential(),
                         kp.leaf_node().signature_key().as_slice(),
                         0,
                     )?;
+                    // One account at a time: every package names the same
+                    // account under the same identity key, and the one the
+                    // caller expects when it names one.
+                    if adding
+                        .first()
+                        .is_some_and(|first| !first.same_account(&member))
+                    {
+                        return Err(Error::Invalid("add one account (1-4 devices) at a time"));
+                    }
+                    if want_uid.is_some_and(|uid| uid != member.uid)
+                        || want_identity
+                            .as_deref()
+                            .is_some_and(|identity| identity != member.identity)
+                    {
+                        return Err(Error::Crypto("not the expected account"));
+                    }
+                    adding.push(member);
                     packages.push(kp);
                 }
                 if packages.is_empty() || packages.len() > 4 {
@@ -453,6 +497,12 @@ impl GroupStore {
         ];
         if let Some(w) = welcome {
             pairs.push(("welcome".into(), Json::Str(b64_encode(&tls(&w)?))));
+            // Whom this adds, in the order given, for the caller to check
+            // before it saves or sends anything.
+            pairs.push((
+                "added".into(),
+                Json::Arr(adding.iter().map(VerifiedMember::account_json).collect()),
+            ));
         }
         Ok(Json::object(pairs))
     }
@@ -618,7 +668,28 @@ fn meta_extensions(meta: &Meta) -> Result<Extensions<GroupContext>> {
     .map_err(|_| Error::Invalid("meta"))
 }
 
+/// The rules for a name and an administrator list, the same for metadata this
+/// device sends and metadata it receives: a trimmed name of 1 to 40
+/// characters, and well-formed account ids with no repeats.
+fn check_meta(meta: &Meta) -> Result<()> {
+    let chars = meta.name.chars().count();
+    if chars == 0 || chars > MAX_NAME_CHARS || meta.name.trim() != meta.name {
+        return Err(Error::Invalid("group name"));
+    }
+    if meta.admins.len() > MAX_ADMINS {
+        return Err(Error::Invalid("administrators"));
+    }
+    for (i, admin) in meta.admins.iter().enumerate() {
+        credential::check_id(admin).map_err(|_| Error::Invalid("administrators"))?;
+        if meta.admins[..i].contains(admin) {
+            return Err(Error::Invalid("administrators"));
+        }
+    }
+    Ok(())
+}
+
 fn encode_meta(meta: &Meta) -> Result<Vec<u8>> {
+    check_meta(meta)?;
     let mut parts: Vec<&[u8]> = vec![b"fireplace-group-meta-v1", meta.name.as_bytes()];
     for a in &meta.admins {
         parts.push(a.as_bytes());
@@ -632,10 +703,12 @@ fn decode_meta(bytes: &[u8]) -> Result<Meta> {
         return Err(Error::Invalid("meta"));
     }
     let text = |b: &Vec<u8>| String::from_utf8(b.clone()).map_err(|_| Error::Invalid("meta"));
-    Ok(Meta {
+    let meta = Meta {
         name: text(&parts[1])?,
         admins: parts[2..].iter().map(text).collect::<Result<_>>()?,
-    })
+    };
+    check_meta(&meta)?;
+    Ok(meta)
 }
 
 fn gid(obj: &[(String, Json)]) -> Result<GroupId> {

@@ -423,6 +423,7 @@ impl Session {
         check_created(now_ms)?;
         check_local(local, local_bundle)?;
         let dev = &remote.device;
+        dev.check_ids()?;
         if !dev.verify_cert() {
             return Err(Error::Crypto("remote device certificate invalid"));
         }
@@ -511,6 +512,7 @@ impl Session {
     ) -> Result<Self> {
         check_created(now_ms)?;
         check_local(local, local_bundle)?;
+        remote.check_ids()?;
         if !remote.verify_cert() {
             return Err(Error::Crypto("remote device certificate invalid"));
         }
@@ -831,6 +833,7 @@ fn map_chain_error(error: Error) -> Error {
 }
 
 fn check_local(local: &DeviceKeys, bundle: &DeviceBundle) -> Result<()> {
+    bundle.check_ids()?;
     let public = prim::x25519_public(&local.x25519_seed)?;
     if !bytes_equal(&public, &bundle.x25519_pub)
         || !bytes_equal(&local.kem_pub, &bundle.kem_pub)
