@@ -283,54 +283,6 @@ fn a_store_reloaded_from_saved_records_carries_on() {
 }
 
 #[test]
-fn applying_the_changes_reproduces_the_store() {
-    let (mut alice, mut bob1, _) = book_club();
-    let mut copy = bob1.store.records();
-    let ct = alice.send("delta");
-    let out = bob1
-        .raw(&format!(
-            r#"{{"op":"process","gid":"{GID}","message":"{ct}"}}"#
-        ))
-        .unwrap();
-    for c in field(&out, "changes").as_array().unwrap() {
-        let k = b64_decode(&s(c, "k")).unwrap();
-        match field(c, "v") {
-            Json::Null => {
-                copy.remove(&k);
-            }
-            v => {
-                copy.insert(k, b64_decode(v.as_str().unwrap()).unwrap());
-            }
-        }
-    }
-    bob1.store.accept().unwrap();
-    assert_eq!(copy, bob1.store.records());
-}
-
-#[test]
-fn bad_requests_are_refused() {
-    let (mut alice, _, _) = book_club();
-    for bad in [
-        r#"{"op":"nope"}"#.to_string(),
-        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":""}}"#,
-            b64url_encode(&[9; 16])
-        ),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
-            b64url_encode(&[9; 16]),
-            "x".repeat(41)
-        ),
-        r#"{"op":"key_packages","count":11}"#.to_string(),
-        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
-    ] {
-        assert!(alice.raw(&bad).is_err(), "{bad}");
-        assert!(alice.store.accept().is_err());
-    }
-}
-
-#[test]
 fn members_are_reported_with_certificate_hash_and_generation() {
     let (mut alice, mut bob1, _) = book_club();
     let hash = b64_encode(&[7u8; 32]);
@@ -415,6 +367,54 @@ fn a_credential_with_a_malformed_hash_or_generation_is_refused() {
                 .is_err(),
             "hash {hash_len} generation {generation}"
         );
+        assert!(alice.store.accept().is_err());
+    }
+}
+
+#[test]
+fn applying_the_changes_reproduces_the_store() {
+    let (mut alice, mut bob1, _) = book_club();
+    let mut copy = bob1.store.records();
+    let ct = alice.send("delta");
+    let out = bob1
+        .raw(&format!(
+            r#"{{"op":"process","gid":"{GID}","message":"{ct}"}}"#
+        ))
+        .unwrap();
+    for c in field(&out, "changes").as_array().unwrap() {
+        let k = b64_decode(&s(c, "k")).unwrap();
+        match field(c, "v") {
+            Json::Null => {
+                copy.remove(&k);
+            }
+            v => {
+                copy.insert(k, b64_decode(v.as_str().unwrap()).unwrap());
+            }
+        }
+    }
+    bob1.store.accept().unwrap();
+    assert_eq!(copy, bob1.store.records());
+}
+
+#[test]
+fn bad_requests_are_refused() {
+    let (mut alice, _, _) = book_club();
+    for bad in [
+        r#"{"op":"nope"}"#.to_string(),
+        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":""}}"#,
+            b64url_encode(&[9; 16])
+        ),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
+            b64url_encode(&[9; 16]),
+            "x".repeat(41)
+        ),
+        r#"{"op":"key_packages","count":11}"#.to_string(),
+        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
+    ] {
+        assert!(alice.raw(&bad).is_err(), "{bad}");
         assert!(alice.store.accept().is_err());
     }
 }
