@@ -498,3 +498,78 @@ fn safety_number_ignores_order() {
         safety_number(&a, &b).unwrap()
     );
 }
+
+/// A handshake towards `uid`, as far as it gets, and the bundle it used.
+fn initiate_towards(uid: &str, rng: &mut Rng) -> (fireplace_crypto::Result<Session>, String) {
+    let alice_id = AccountIdentity::generate(rng).unwrap();
+    let alice_keys = DeviceKeys::generate(rng).unwrap();
+    let alice_bundle = alice_keys.certify(&alice_id, "alice", rng).unwrap();
+    let bob_id = AccountIdentity::generate(rng).unwrap();
+    let bob_keys = DeviceKeys::generate(rng).unwrap();
+    let bob_bundle = bob_keys.certify(&bob_id, uid, rng).unwrap();
+    let record = PreKeyRecord::generate(rng, NOW).unwrap();
+    let signed = sign_prekey(&record, &bob_id, uid, &bob_keys.device_id, rng).unwrap();
+    let bundle_json = bob_bundle.to_json();
+    let remote = PreKeyBundle {
+        device: bob_bundle,
+        signed,
+        one_time: None,
+    };
+    let session = Session::initiate(&alice_keys, &alice_bundle, &remote, rng, NOW).map(|(s, _)| s);
+    (session, bundle_json)
+}
+
+#[test]
+fn every_session_that_can_be_created_can_be_loaded_again() {
+    let mut rng = Rng::os();
+    // The longest account id a saved session accepts.
+    let (session, bundle_json) = initiate_towards(&"u".repeat(128), &mut rng);
+    let session = session.unwrap();
+    assert!(Session::from_json(&session.to_json()).is_ok());
+    assert!(fireplace_crypto::DeviceBundle::from_json(&bundle_json).is_ok());
+
+    // One byte longer: refused when the bundle is read and when a session is
+    // started, where it used to give a session that could not be loaded.
+    let (session, bundle_json) = initiate_towards(&"u".repeat(129), &mut rng);
+    assert!(matches!(session, Err(Error::Invalid(_))));
+    assert!(fireplace_crypto::DeviceBundle::from_json(&bundle_json).is_err());
+}
+
+#[test]
+fn a_remote_device_bundle_is_held_to_size_and_id_limits() {
+    let mut rng = Rng::os();
+    let identity = AccountIdentity::generate(&mut rng).unwrap();
+    let keys = DeviceKeys::generate(&mut rng).unwrap();
+    let good = keys.certify(&identity, "bob", &mut rng).unwrap().to_json();
+    assert!(fireplace_crypto::DeviceBundle::from_json(&good).is_ok());
+    let id = format!("\"deviceId\":\"{}\"", keys.device_id);
+    assert!(good.contains(&id));
+    for bad_id in [
+        "short",
+        "has space in it",
+        "slash/slash",
+        &"d".repeat(65),
+        "",
+    ] {
+        let bad = good.replace(&id, &format!("\"deviceId\":\"{bad_id}\""));
+        assert!(
+            fireplace_crypto::DeviceBundle::from_json(&bad).is_err(),
+            "{bad_id}"
+        );
+    }
+    assert!(
+        fireplace_crypto::DeviceBundle::from_json(&good.replace("\"uid\":\"bob\"", "\"uid\":\"\""))
+            .is_err()
+    );
+    // An identity key or a certificate far larger than a real one.
+    let padding = "AAAA".repeat(4096);
+    for field in ["identityPub", "cert"] {
+        let marker = format!("\"{field}\":\"");
+        let bad = good.replace(&marker, &format!("{marker}{padding}"));
+        assert_ne!(bad, good);
+        assert!(
+            fireplace_crypto::DeviceBundle::from_json(&bad).is_err(),
+            "{field}"
+        );
+    }
+}
