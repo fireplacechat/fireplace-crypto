@@ -52,11 +52,33 @@ impl Credential {
         generation: u64,
         rng: &mut Rng,
     ) -> Result<Self> {
-        check_id(uid)?;
-        check_id(device)?;
         if cert_hash.len() != 32 {
             return Err(Error::Invalid("certificate hash"));
         }
+        Self::issue_unchecked(
+            identity,
+            uid,
+            device,
+            cert_hash,
+            signature_key,
+            generation,
+            rng,
+        )
+    }
+
+    /// Signs whatever it is given. `issue` is the checked form; tests use this
+    /// one to make credentials a careful issuer never would.
+    pub(super) fn issue_unchecked(
+        identity: &AccountIdentity,
+        uid: &str,
+        device: &str,
+        cert_hash: &[u8],
+        signature_key: &[u8],
+        generation: u64,
+        rng: &mut Rng,
+    ) -> Result<Self> {
+        check_id(uid)?;
+        check_id(device)?;
         let public = identity.public_bytes()?;
         let message = Self::signed(uid, device, cert_hash, signature_key, generation, &public)?;
         Ok(Self {
@@ -126,7 +148,7 @@ impl Credential {
     }
 }
 
-fn check_id(id: &str) -> Result<()> {
+pub(super) fn check_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > MAX_ID || id.contains(['/', ':']) {
         return Err(Error::Invalid("credential id"));
     }
@@ -141,6 +163,10 @@ pub struct VerifiedMember {
     pub device: String,
     pub identity: Vec<u8>,
     pub signature_key: Vec<u8>,
+    /// SHA-256 of the device certificate the account signed this credential for.
+    pub cert_hash: Vec<u8>,
+    /// The credential's generation, as the account signed it.
+    pub generation: i64,
 }
 
 impl VerifiedMember {
@@ -152,17 +178,39 @@ impl VerifiedMember {
         if c.signature_key != signature_key || !c.verify() {
             return Err(Error::Crypto("credential"));
         }
+        // Both are reported to the app, so both must be of the form `issue`
+        // makes: a SHA-256 value, and a generation that fits a JSON integer.
+        let generation = i64::try_from(c.generation).map_err(|_| Error::Crypto("credential"))?;
+        if c.cert_hash.len() != 32 {
+            return Err(Error::Crypto("credential"));
+        }
         Ok(Self {
             leaf,
             uid: c.uid,
             device: c.device,
             identity: c.identity,
             signature_key: signature_key.to_vec(),
+            cert_hash: c.cert_hash,
+            generation,
         })
     }
 
     pub fn same_leaf(&self, other: &Self) -> bool {
         self.leaf == other.leaf && self.signature_key == other.signature_key
+    }
+
+    /// Same account: the same id under the same account identity key.
+    pub fn same_account(&self, other: &Self) -> bool {
+        self.uid == other.uid && self.identity == other.identity
+    }
+
+    /// A device that is not in the tree yet, so it has no leaf to report.
+    pub fn account_json(&self) -> Json {
+        Json::object(vec![
+            ("uid".into(), Json::Str(self.uid.clone())),
+            ("device".into(), Json::Str(self.device.clone())),
+            ("identity".into(), Json::Str(b64_encode(&self.identity))),
+        ])
     }
 
     pub fn to_json(&self) -> Json {
@@ -171,6 +219,8 @@ impl VerifiedMember {
             ("uid".into(), Json::Str(self.uid.clone())),
             ("device".into(), Json::Str(self.device.clone())),
             ("identity".into(), Json::Str(b64_encode(&self.identity))),
+            ("certHash".into(), Json::Str(b64_encode(&self.cert_hash))),
+            ("generation".into(), Json::Int(self.generation)),
         ])
     }
 }

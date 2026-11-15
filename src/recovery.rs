@@ -11,12 +11,19 @@ use crate::error::{Error, Result};
 use crate::identity::AccountIdentity;
 use crate::kdf::{hkdf_sha256, sha256};
 use crate::rng::Rng;
+use zeroize::{Zeroize, Zeroizing};
 
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const BACKUP_INFO: &[u8] = b"fireplace/v1/backup";
 
 pub struct RecoveryKey {
     bytes: [u8; 20],
+}
+
+impl Drop for RecoveryKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
 }
 
 impl core::fmt::Debug for RecoveryKey {
@@ -62,7 +69,9 @@ impl RecoveryKey {
             .filter(|c| !c.is_whitespace() && *c != '-')
             .flat_map(|c| c.to_uppercase())
             .collect();
-        if folded.len() != 36 {
+        // A key is 36 ASCII characters. The check is on bytes, so text with a
+        // longer character in it must be refused before it is sliced.
+        if folded.len() != 36 || !folded.is_ascii() {
             return Ok(None);
         }
         let Some(data) = unbase32(&folded[..32]) else {
@@ -79,17 +88,18 @@ impl RecoveryKey {
         Ok(Some(Self { bytes: key }))
     }
 
-    fn aead_key(&self) -> Result<[u8; 32]> {
-        let mut out = [0u8; 32];
-        hkdf_sha256(&self.bytes, b"", BACKUP_INFO, &mut out)?;
+    fn aead_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        let mut out = Zeroizing::new([0u8; 32]);
+        hkdf_sha256(&self.bytes, b"", BACKUP_INFO, &mut out[..])?;
         Ok(out)
     }
 }
 
 pub fn encrypt(identity: &AccountIdentity, key: &RecoveryKey, rng: &mut Rng) -> Result<String> {
-    let plain = identity.to_json().into_bytes();
+    // The plaintext is every secret key of the account: wipe it when done.
+    let plain = Zeroizing::new(identity.to_json().into_bytes());
     let nonce = rng.array::<12>()?;
-    let (ciphertext, tag) = aead::seal(&key.aead_key()?, &nonce, BACKUP_INFO, &plain)?;
+    let (ciphertext, tag) = aead::seal(&key.aead_key()?[..], &nonce, BACKUP_INFO, &plain)?;
     let mut boxed = Vec::with_capacity(12 + ciphertext.len() + 16);
     boxed.extend_from_slice(&nonce);
     boxed.extend_from_slice(&ciphertext);
@@ -107,7 +117,8 @@ pub fn decrypt(blob: &str, key: &RecoveryKey) -> Result<AccountIdentity> {
     }
     let (nonce, rest) = boxed.split_at(12);
     let (ciphertext, tag) = rest.split_at(rest.len() - 16);
-    let plain = aead::open(&key.aead_key()?, nonce, BACKUP_INFO, ciphertext, tag)
+    let plain = aead::open(&key.aead_key()?[..], nonce, BACKUP_INFO, ciphertext, tag)
+        .map(Zeroizing::new)
         .map_err(|_| Error::Crypto("Wrong recovery key, or the backup is damaged."))?;
     let text = core::str::from_utf8(&plain)
         .map_err(|_| Error::Crypto("Wrong recovery key, or the backup is damaged."))?;
@@ -160,4 +171,68 @@ fn unbase32(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_parses_back_in_any_case_and_grouping() {
+        let key = RecoveryKey::from_bytes(&[0x5a; 20]).unwrap();
+        let shown = key.display().unwrap();
+        assert_eq!(shown.len(), 36 + 8);
+        for text in [
+            shown.clone(),
+            shown.to_lowercase(),
+            shown.replace('-', " "),
+            shown.replace('-', ""),
+        ] {
+            let parsed = RecoveryKey::parse(&text).unwrap().expect("a valid key");
+            assert_eq!(parsed.as_bytes(), key.as_bytes());
+        }
+    }
+
+    #[test]
+    fn text_that_is_not_ascii_is_not_a_key() {
+        // 36 bytes after folding, with a two-byte character across byte 32,
+        // across byte 1, and at the very end.
+        for text in [
+            format!("{}é{}", "A".repeat(31), "AAA"),
+            format!("é{}", "A".repeat(34)),
+            format!("{}é", "A".repeat(34)),
+            "é".repeat(18),
+            // `ß` upper-cases to two letters, so 35 characters fold to 36.
+            format!("{}ß", "A".repeat(34)),
+        ] {
+            assert!(RecoveryKey::parse(&text).unwrap().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_wrong_checksum_or_length_is_not_a_key() {
+        let shown = RecoveryKey::from_bytes(&[7; 20])
+            .unwrap()
+            .display()
+            .unwrap();
+        let mut wrong = shown.clone().into_bytes();
+        let last = wrong.len() - 1;
+        wrong[last] = if wrong[last] == b'A' { b'B' } else { b'A' };
+        assert!(
+            RecoveryKey::parse(std::str::from_utf8(&wrong).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            RecoveryKey::parse(&shown[..shown.len() - 1])
+                .unwrap()
+                .is_none()
+        );
+        assert!(RecoveryKey::parse("").unwrap().is_none());
+        assert!(
+            RecoveryKey::parse("1111-1111-1111-1111-1111-1111-1111-1111-1111")
+                .unwrap()
+                .is_none()
+        );
+    }
 }

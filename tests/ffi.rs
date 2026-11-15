@@ -82,6 +82,11 @@ fn malformed_recovery_and_session_json_do_not_look_valid() {
     let code = unsafe { fp_recovery_parse(text.as_ptr(), text.len(), &mut out) };
     assert_eq!(code, FP_INVALID);
     assert!(out.ptr.is_null());
+    // Text with a longer character in it is refused the same way.
+    let text = format!("{}\u{e9}AAA", "A".repeat(31));
+    let code = unsafe { fp_recovery_parse(text.as_ptr(), text.len(), &mut out) };
+    assert_eq!(code, FP_INVALID);
+    assert!(out.ptr.is_null());
     let mut flag = 1;
     let bad = b"nope";
     assert_eq!(
