@@ -32,6 +32,8 @@ pub const SUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA
 /// Group-context extension carrying the encrypted name and administrators.
 const META_EXTENSION: u16 = 0xF0F1;
 const MAX_NAME_CHARS: usize = 40;
+/// Most administrators one group may name. Far above any real group.
+const MAX_ADMINS: usize = 64;
 const MAX_KEY_PACKAGES: i64 = 10;
 /// Longest input the store accepts in one call.
 pub const MAX_INPUT: usize = 4 << 20;
@@ -599,7 +601,28 @@ fn meta_extensions(meta: &Meta) -> Result<Extensions<GroupContext>> {
     .map_err(|_| Error::Invalid("meta"))
 }
 
+/// The rules for a name and an administrator list, the same for metadata this
+/// device sends and metadata it receives: a trimmed name of 1 to 40
+/// characters, and well-formed account ids with no repeats.
+fn check_meta(meta: &Meta) -> Result<()> {
+    let chars = meta.name.chars().count();
+    if chars == 0 || chars > MAX_NAME_CHARS || meta.name.trim() != meta.name {
+        return Err(Error::Invalid("group name"));
+    }
+    if meta.admins.len() > MAX_ADMINS {
+        return Err(Error::Invalid("administrators"));
+    }
+    for (i, admin) in meta.admins.iter().enumerate() {
+        credential::check_id(admin).map_err(|_| Error::Invalid("administrators"))?;
+        if meta.admins[..i].contains(admin) {
+            return Err(Error::Invalid("administrators"));
+        }
+    }
+    Ok(())
+}
+
 fn encode_meta(meta: &Meta) -> Result<Vec<u8>> {
+    check_meta(meta)?;
     let mut parts: Vec<&[u8]> = vec![b"fireplace-group-meta-v1", meta.name.as_bytes()];
     for a in &meta.admins {
         parts.push(a.as_bytes());
@@ -613,10 +636,12 @@ fn decode_meta(bytes: &[u8]) -> Result<Meta> {
         return Err(Error::Invalid("meta"));
     }
     let text = |b: &Vec<u8>| String::from_utf8(b.clone()).map_err(|_| Error::Invalid("meta"));
-    Ok(Meta {
+    let meta = Meta {
         name: text(&parts[1])?,
         admins: parts[2..].iter().map(text).collect::<Result<_>>()?,
-    })
+    };
+    check_meta(&meta)?;
+    Ok(meta)
 }
 
 fn gid(obj: &[(String, Json)]) -> Result<GroupId> {

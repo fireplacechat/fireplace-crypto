@@ -329,3 +329,91 @@ fn bad_requests_are_refused() {
         assert!(alice.store.accept().is_err());
     }
 }
+
+/// A Commit by `phone` that sets the metadata extension to exactly `raw`,
+/// as a modified app could, without the checks `commit_meta` applies.
+fn raw_meta_commit(phone: &mut Phone, raw: Vec<u8>) -> String {
+    let gid = GroupId::from_slice(&crate::codec::b64url_decode(GID).unwrap());
+    let mut group = phone.store.load(&gid).unwrap();
+    let (signer, _) = phone.store.signer().unwrap();
+    let extensions = Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(META_EXTENSION)],
+            &[],
+            &[CredentialType::Basic],
+        )),
+        Extension::Unknown(META_EXTENSION, UnknownExtension(raw)),
+    ])
+    .unwrap();
+    let (commit, _, _) = group
+        .update_group_context_extensions(&phone.store.provider, extensions, &signer)
+        .unwrap();
+    b64_encode(&tls(&commit).unwrap())
+}
+
+fn raw_meta(name: &str, admins: &[&str]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = vec![b"fireplace-group-meta-v1", name.as_bytes()];
+    parts.extend(admins.iter().map(|a| a.as_bytes()));
+    crate::codec::lp(&parts).unwrap()
+}
+
+#[test]
+fn received_metadata_is_held_to_the_rules_for_sent_metadata() {
+    let long = "x".repeat(41);
+    let many: Vec<String> = (0..65).map(|i| format!("account-{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        (long.as_str(), vec!["alice"]),
+        ("", vec!["alice"]),
+        (" padded ", vec!["alice"]),
+        ("Book club", vec!["alice", "alice"]),
+        ("Book club", vec!["alice", ""]),
+        ("Book club", vec!["a/b"]),
+        ("Book club", many),
+    ];
+    for (name, admins) in cases {
+        let (mut alice, mut bob1, _) = book_club();
+        let commit = raw_meta_commit(&mut bob1, raw_meta(name, &admins));
+        let before = alice.info();
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"process","gid":"{GID}","message":"{commit}"}}"#
+                ))
+                .is_err(),
+            "{name:?} {admins:?}"
+        );
+        // Refused, and nothing changed or left open.
+        assert_eq!(alice.info(), before);
+        assert!(alice.store.accept().is_err());
+    }
+    // Metadata within the rules, sent the same raw way, is accepted.
+    let (mut alice, mut bob1, _) = book_club();
+    let commit = raw_meta_commit(&mut bob1, raw_meta("Tea club", &["alice", "bob"]));
+    let got = alice.receive(&commit);
+    assert_eq!(s(&got, "name"), "Tea club");
+    assert_eq!(field(&got, "admins").as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn this_device_cannot_send_metadata_others_would_refuse() {
+    let (mut alice, _, _) = book_club();
+    for admins in [r#"["alice","alice"]"#, r#"["alice",""]"#, r#"["a:b"]"#] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_meta","gid":"{GID}","admins":{admins}}}"#
+                ))
+                .is_err(),
+            "{admins}"
+        );
+        assert!(alice.store.accept().is_err());
+    }
+    // An empty list and a normal list are still allowed.
+    for admins in ["[]", r#"["alice","bob"]"#] {
+        alice.change(&format!(
+            r#"{{"op":"commit_meta","gid":"{GID}","admins":{admins}}}"#
+        ));
+        alice.change(&format!(r#"{{"op":"discard_pending","gid":"{GID}"}}"#));
+    }
+}
