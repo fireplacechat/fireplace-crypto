@@ -148,7 +148,7 @@ impl Credential {
     }
 }
 
-fn check_id(id: &str) -> Result<()> {
+pub(super) fn check_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > MAX_ID || id.contains(['/', ':']) {
         return Err(Error::Invalid("credential id"));
     }
@@ -197,6 +197,20 @@ impl VerifiedMember {
 
     pub fn same_leaf(&self, other: &Self) -> bool {
         self.leaf == other.leaf && self.signature_key == other.signature_key
+    }
+
+    /// Same account: the same id under the same account identity key.
+    pub fn same_account(&self, other: &Self) -> bool {
+        self.uid == other.uid && self.identity == other.identity
+    }
+
+    /// A device that is not in the tree yet, so it has no leaf to report.
+    pub fn account_json(&self) -> Json {
+        Json::object(vec![
+            ("uid".into(), Json::Str(self.uid.clone())),
+            ("device".into(), Json::Str(self.device.clone())),
+            ("identity".into(), Json::Str(b64_encode(&self.identity))),
+        ])
     }
 
     pub fn to_json(&self) -> Json {

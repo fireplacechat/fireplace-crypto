@@ -62,7 +62,9 @@ impl RecoveryKey {
             .filter(|c| !c.is_whitespace() && *c != '-')
             .flat_map(|c| c.to_uppercase())
             .collect();
-        if folded.len() != 36 {
+        // A key is 36 ASCII characters. The check is on bytes, so text with a
+        // longer character in it must be refused before it is sliced.
+        if folded.len() != 36 || !folded.is_ascii() {
             return Ok(None);
         }
         let Some(data) = unbase32(&folded[..32]) else {
@@ -160,4 +162,68 @@ fn unbase32(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_parses_back_in_any_case_and_grouping() {
+        let key = RecoveryKey::from_bytes(&[0x5a; 20]).unwrap();
+        let shown = key.display().unwrap();
+        assert_eq!(shown.len(), 36 + 8);
+        for text in [
+            shown.clone(),
+            shown.to_lowercase(),
+            shown.replace('-', " "),
+            shown.replace('-', ""),
+        ] {
+            let parsed = RecoveryKey::parse(&text).unwrap().expect("a valid key");
+            assert_eq!(parsed.as_bytes(), key.as_bytes());
+        }
+    }
+
+    #[test]
+    fn text_that_is_not_ascii_is_not_a_key() {
+        // 36 bytes after folding, with a two-byte character across byte 32,
+        // across byte 1, and at the very end.
+        for text in [
+            format!("{}é{}", "A".repeat(31), "AAA"),
+            format!("é{}", "A".repeat(34)),
+            format!("{}é", "A".repeat(34)),
+            "é".repeat(18),
+            // `ß` upper-cases to two letters, so 35 characters fold to 36.
+            format!("{}ß", "A".repeat(34)),
+        ] {
+            assert!(RecoveryKey::parse(&text).unwrap().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_wrong_checksum_or_length_is_not_a_key() {
+        let shown = RecoveryKey::from_bytes(&[7; 20])
+            .unwrap()
+            .display()
+            .unwrap();
+        let mut wrong = shown.clone().into_bytes();
+        let last = wrong.len() - 1;
+        wrong[last] = if wrong[last] == b'A' { b'B' } else { b'A' };
+        assert!(
+            RecoveryKey::parse(std::str::from_utf8(&wrong).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            RecoveryKey::parse(&shown[..shown.len() - 1])
+                .unwrap()
+                .is_none()
+        );
+        assert!(RecoveryKey::parse("").unwrap().is_none());
+        assert!(
+            RecoveryKey::parse("1111-1111-1111-1111-1111-1111-1111-1111-1111")
+                .unwrap()
+                .is_none()
+        );
+    }
 }
