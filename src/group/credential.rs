@@ -126,7 +126,7 @@ impl Credential {
     }
 }
 
-fn check_id(id: &str) -> Result<()> {
+pub(super) fn check_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > MAX_ID || id.contains(['/', ':']) {
         return Err(Error::Invalid("credential id"));
     }
