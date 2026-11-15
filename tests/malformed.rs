@@ -229,6 +229,7 @@ fn damaged_encodings_never_panic_and_stay_stable() {
         &w.bob_keys.device_id,
         &w.bob_keys.x25519_pub,
         &w.bob_keys.kem_pub,
+        &[3u8; 16],
         &mut rng,
     )
     .unwrap();

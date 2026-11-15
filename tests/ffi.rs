@@ -99,3 +99,73 @@ fn malformed_recovery_and_session_json_do_not_look_valid() {
         FP_BAD_ARG
     );
 }
+
+#[test]
+fn link_seal_and_open_take_the_qr_secret() {
+    use fireplace_crypto::ffi::{fp_free, fp_link_open_v2, fp_link_seal_v2};
+    use fireplace_crypto::{AccountIdentity, DeviceKeys, Rng};
+
+    let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    #[cfg(feature = "test-rng")]
+    fp_clear_test_rng();
+    let mut rng = Rng::os();
+    let identity = AccountIdentity::generate(&mut rng).unwrap().to_json();
+    let device = DeviceKeys::generate(&mut rng).unwrap();
+    let device_json = device.to_json();
+    let uid = b"ada";
+    let secret = [9u8; 16];
+    let empty = || FpBuf {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+    };
+
+    let seal = |secret: &[u8], out: &mut FpBuf| unsafe {
+        fp_link_seal_v2(
+            identity.as_ptr(),
+            identity.len(),
+            uid.as_ptr(),
+            uid.len(),
+            device.device_id.as_ptr(),
+            device.device_id.len(),
+            device.x25519_pub.as_ptr(),
+            device.x25519_pub.len(),
+            device.kem_pub.as_ptr(),
+            device.kem_pub.len(),
+            secret.as_ptr(),
+            secret.len(),
+            out,
+        )
+    };
+    let mut sealed = empty();
+    assert_eq!(seal(&secret, &mut sealed), FP_OK);
+    let open = |secret: &[u8], out: &mut FpBuf| unsafe {
+        fp_link_open_v2(
+            sealed.ptr,
+            sealed.len,
+            uid.as_ptr(),
+            uid.len(),
+            device_json.as_ptr(),
+            device_json.len(),
+            secret.as_ptr(),
+            secret.len(),
+            out,
+        )
+    };
+
+    let mut opened = empty();
+    assert_eq!(open(&secret, &mut opened), FP_OK);
+    let text = unsafe { std::slice::from_raw_parts(opened.ptr, opened.len) };
+    assert_eq!(text, identity.as_bytes());
+    unsafe { fp_free(opened.ptr, opened.len) };
+
+    // A wrong secret gives an error and no output; so does one that is too short.
+    let mut refused = empty();
+    assert_ne!(open(&[8u8; 16], &mut refused), FP_OK);
+    assert!(refused.ptr.is_null());
+    assert_eq!(open(&secret[..15], &mut refused), FP_INVALID);
+    assert!(refused.ptr.is_null());
+    assert_eq!(seal(&secret[..15], &mut refused), FP_INVALID);
+    assert!(refused.ptr.is_null());
+
+    unsafe { fp_free(sealed.ptr, sealed.len) };
+}
