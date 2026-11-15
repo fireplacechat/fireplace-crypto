@@ -9,7 +9,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead;
 use crate::codec::{self, Json, b64_encode, b64url_encode, bytes_equal, concat, lp, u64_bytes};
@@ -438,21 +438,29 @@ impl Session {
 
         let mut ek_seed = rng.array::<32>()?;
         let ek_pub = prim::x25519_public(&ek_seed)?.to_vec();
-        let dh1 = prim::x25519_dh(&local.x25519_seed, &spk.x25519_pub)?;
-        let dh2 = prim::x25519_dh(&ek_seed, &dev.x25519_pub)?;
-        let dh3 = prim::x25519_dh(&ek_seed, &spk.x25519_pub)?;
-        let dh4 = match opk {
-            Some(opk) => Some(prim::x25519_dh(&ek_seed, &opk.x25519_pub)?),
-            None => None,
-        };
+        // Every shared secret below is wiped when it goes out of scope, on
+        // the failure paths too. The ephemeral seed is wiped whether or not
+        // the four exchanges succeed.
+        let exchanged = (|| {
+            let dh1 = Zeroizing::new(prim::x25519_dh(&local.x25519_seed, &spk.x25519_pub)?);
+            let dh2 = Zeroizing::new(prim::x25519_dh(&ek_seed, &dev.x25519_pub)?);
+            let dh3 = Zeroizing::new(prim::x25519_dh(&ek_seed, &spk.x25519_pub)?);
+            let dh4 = match opk {
+                Some(opk) => Some(Zeroizing::new(prim::x25519_dh(&ek_seed, &opk.x25519_pub)?)),
+                None => None,
+            };
+            Ok::<_, Error>((dh1, dh2, dh3, dh4))
+        })();
         ek_seed.zeroize();
-        let coins = rng.array::<32>()?;
-        let (ct1, ss1) = prim::mlkem_encapsulate(&spk.kem_pub, &coins)?;
+        let (dh1, dh2, dh3, dh4) = exchanged?;
+        let coins = Zeroizing::new(rng.array::<32>()?);
+        let (ct1, ss1) = prim::mlkem_encapsulate(&spk.kem_pub, &coins[..])?;
+        let ss1 = Zeroizing::new(ss1);
         let (ct2, ss2) = match opk {
             Some(opk) => {
-                let coins = rng.array::<32>()?;
-                let (ct, ss) = prim::mlkem_encapsulate(&opk.kem_pub, &coins)?;
-                (Some(ct), Some(ss))
+                let coins = Zeroizing::new(rng.array::<32>()?);
+                let (ct, ss) = prim::mlkem_encapsulate(&opk.kem_pub, &coins[..])?;
+                (Some(ct), Some(Zeroizing::new(ss)))
             }
             None => (None, None),
         };
@@ -476,11 +484,11 @@ impl Session {
             }),
             &handshake,
             &[
-                Some(&dh1),
-                Some(&dh2),
-                Some(&dh3),
+                Some(&dh1[..]),
+                Some(&dh2[..]),
+                Some(&dh3[..]),
                 dh4.as_ref().map(|b| b.as_slice()),
-                Some(&ss1),
+                Some(&ss1[..]),
                 ss2.as_ref().map(|b| b.as_slice()),
             ],
         )?;
@@ -524,22 +532,29 @@ impl Session {
         {
             return Err(Error::Crypto("one-time prekey mismatch"));
         }
-        let dh1 = prim::x25519_dh(&signed_prekey.x25519_seed, &remote.x25519_pub)?;
-        let dh2 = prim::x25519_dh(&local.x25519_seed, &handshake.ek)?;
-        let dh3 = prim::x25519_dh(&signed_prekey.x25519_seed, &handshake.ek)?;
+        // Wiped when they go out of scope, on the failure paths too.
+        let dh1 = Zeroizing::new(prim::x25519_dh(
+            &signed_prekey.x25519_seed,
+            &remote.x25519_pub,
+        )?);
+        let dh2 = Zeroizing::new(prim::x25519_dh(&local.x25519_seed, &handshake.ek)?);
+        let dh3 = Zeroizing::new(prim::x25519_dh(&signed_prekey.x25519_seed, &handshake.ek)?);
         let (dh4, ss2) = match one_time {
             Some(opk) => {
-                let dh4 = prim::x25519_dh(&opk.x25519_seed, &handshake.ek)?;
+                let dh4 = Zeroizing::new(prim::x25519_dh(&opk.x25519_seed, &handshake.ek)?);
                 let ct = handshake
                     .opk_kem_ct
                     .as_deref()
                     .ok_or(Error::Crypto("one-time prekey mismatch"))?;
-                let ss2 = prim::mlkem_decapsulate(&opk.kem_secret, ct)?;
+                let ss2 = Zeroizing::new(prim::mlkem_decapsulate(&opk.kem_secret, ct)?);
                 (Some(dh4), Some(ss2))
             }
             None => (None, None),
         };
-        let ss1 = prim::mlkem_decapsulate(&signed_prekey.kem_secret, &handshake.kem_ct)?;
+        let ss1 = Zeroizing::new(prim::mlkem_decapsulate(
+            &signed_prekey.kem_secret,
+            &handshake.kem_ct,
+        )?);
         let (rk0, sid) = derive_root(
             remote,
             local_bundle,
@@ -557,11 +572,11 @@ impl Session {
             }),
             handshake,
             &[
-                Some(&dh1),
-                Some(&dh2),
-                Some(&dh3),
+                Some(&dh1[..]),
+                Some(&dh2[..]),
+                Some(&dh3[..]),
                 dh4.as_ref().map(|b| b.as_slice()),
-                Some(&ss1),
+                Some(&ss1[..]),
                 ss2.as_ref().map(|b| b.as_slice()),
             ],
         )?;
@@ -603,8 +618,8 @@ impl Session {
             .as_deref()
             .ok_or(Error::Crypto("this session cannot send yet"))?;
         let n = state.ns;
-        let mk = hmac_sha256(cks, &[1]);
-        let next = hmac_sha256(cks, &[2]);
+        let mk = Zeroizing::new(hmac_sha256(cks, &[1]));
+        let next = Zeroizing::new(hmac_sha256(cks, &[2]));
         let rx = state.dhs_pub.clone();
         let rk = state.kem_pub.clone();
         let rc = state
@@ -625,7 +640,7 @@ impl Session {
             &rc,
         )?;
         let nonce = rng.array::<12>()?;
-        let (ct, mac) = aead::seal(&message_key(&mk)?, &nonce, &aad, plaintext)?;
+        let (ct, mac) = aead::seal(&message_key(&mk[..])?[..], &nonce, &aad, plaintext)?;
         state.cks = Some(next.to_vec());
         state.ns = n + 1;
         Ok(Envelope {
@@ -679,10 +694,10 @@ impl Session {
         new_chain: &mut bool,
     ) -> Result<Vec<u8>> {
         let mut state = self.state.clone();
-        let key = (|| -> Result<[u8; 32]> {
+        let key = (|| -> Result<Zeroizing<[u8; 32]>> {
             let skipped_id = format!("{}:{}", b64_encode(&env.rx), env.n);
             if let Some(pos) = state.skipped.iter().position(|(id, _)| id == &skipped_id) {
-                let mk = state.skipped.remove(pos).1;
+                let mk = Zeroizing::new(state.skipped.remove(pos).1);
                 return message_key(&mk);
             }
             let same = state
@@ -719,11 +734,11 @@ impl Session {
                 .ckr
                 .as_deref()
                 .ok_or(Error::Crypto("no receiving chain"))?;
-            let mk = hmac_sha256(ckr, &[1]);
-            let next = hmac_sha256(ckr, &[2]);
+            let mk = Zeroizing::new(hmac_sha256(ckr, &[1]));
+            let next = Zeroizing::new(hmac_sha256(ckr, &[2]));
             state.ckr = Some(next.to_vec());
             state.nr = env.n + 1;
-            message_key(&mk)
+            message_key(&mk[..])
         })()
         .map_err(map_chain_error)?;
 
@@ -740,7 +755,7 @@ impl Session {
             &env.rk,
             &env.rc,
         )?;
-        let plain = aead::open(&key, &env.nonce, &aad, &env.ct, &env.mac)
+        let plain = aead::open(&key[..], &env.nonce, &aad, &env.ct, &env.mac)
             .map_err(|_| Error::Crypto("authentication failed"))?;
         self.state = state;
         self.handshake = None;
@@ -882,40 +897,42 @@ fn derive_root(
         &handshake.kem_ct,
         opk_ct,
     ])?;
-    let secret_parts: Vec<Vec<u8>> = secrets.iter().map(|s| s.unwrap_or(&[]).to_vec()).collect();
-    let secret_refs: Vec<&[u8]> = secret_parts.iter().map(Vec::as_slice).collect();
-    let ikm = lp(&secret_refs)?;
+    // The secrets are borrowed, not copied; the one joined copy is wiped.
+    let secret_refs: Vec<&[u8]> = secrets.iter().map(|s| s.unwrap_or(&[])).collect();
+    let ikm = Zeroizing::new(lp(&secret_refs)?);
     let info = concat(&[LABEL_ROOT, &transcript]);
-    let mut root = [0u8; 32];
-    hkdf_sha256(&ikm, b"", &info, &mut root)?;
+    let mut root = Zeroizing::new([0u8; 32]);
+    hkdf_sha256(&ikm, b"", &info, &mut root[..])?;
     let sid_hash = sha256(&lp(&[LABEL_SID, &transcript])?);
     let sid = b64url_encode(&sid_hash[..16]);
     Ok((root.to_vec(), sid))
 }
 
-fn kdf_rk(rk: &[u8], dh: &[u8], ss: &[u8]) -> Result<([u8; 32], [u8; 32])> {
-    let mut out = [0u8; 64];
-    hkdf_sha256(&lp(&[dh, ss])?, rk, LABEL_RATCHET, &mut out)?;
-    let mut root = [0u8; 32];
-    let mut chain = [0u8; 32];
-    root.copy_from_slice(&out[..32]);
-    chain.copy_from_slice(&out[32..]);
-    out.zeroize();
-    Ok((root, chain))
+fn kdf_rk(rk: &[u8], dh: &[u8], ss: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut out = Zeroizing::new([0u8; 64]);
+    let ikm = Zeroizing::new(lp(&[dh, ss])?);
+    hkdf_sha256(&ikm, rk, LABEL_RATCHET, &mut out[..])?;
+    // The two halves go straight into the state, which wipes them on drop.
+    Ok((out[..32].to_vec(), out[32..].to_vec()))
 }
 
 fn send_step(state: &mut State, remote_x: &[u8], remote_kem: &[u8], rng: &mut Rng) -> Result<()> {
     let mut seed = rng.array::<32>()?;
     let public = prim::x25519_public(&seed)?.to_vec();
     let kem = prim::mlkem_generate(rng)?;
-    let dh = prim::x25519_dh(&seed, remote_x)?;
-    let coins = rng.array::<32>()?;
-    let (ct, ss) = prim::mlkem_encapsulate(remote_kem, &coins)?;
-    let (rk, ck) = kdf_rk(&state.rk, &dh, &ss)?;
+    let dh = Zeroizing::new(prim::x25519_dh(&seed, remote_x)?);
+    let coins = Zeroizing::new(rng.array::<32>()?);
+    let (ct, ss) = prim::mlkem_encapsulate(remote_kem, &coins[..])?;
+    let ss = Zeroizing::new(ss);
+    let (rk, ck) = kdf_rk(&state.rk, &dh[..], &ss[..])?;
     state.pn = state.ns;
     state.ns = 0;
-    state.rk = rk.to_vec();
-    state.cks = Some(ck.to_vec());
+    state.rk.zeroize();
+    state.rk = rk;
+    if let Some(old) = &mut state.cks {
+        old.zeroize();
+    }
+    state.cks = Some(ck);
     state.retire(&state.dhs_pub.clone());
     state.dhs_seed = seed.to_vec();
     state.dhs_pub = public;
@@ -933,12 +950,17 @@ fn recv_step(
     rc: &[u8],
     rng: &mut Rng,
 ) -> Result<()> {
-    let dh = prim::x25519_dh(&state.dhs_seed, rx)?;
+    let dh = Zeroizing::new(prim::x25519_dh(&state.dhs_seed, rx)?);
     let ss = prim::mlkem_decapsulate(&state.kem_secret, rc)
+        .map(Zeroizing::new)
         .map_err(|_| Error::Crypto("bad ratchet KEM ciphertext"))?;
-    let (rk, ck) = kdf_rk(&state.rk, &dh, &ss)?;
-    state.rk = rk.to_vec();
-    state.ckr = Some(ck.to_vec());
+    let (rk, ck) = kdf_rk(&state.rk, &dh[..], &ss[..])?;
+    state.rk.zeroize();
+    state.rk = rk;
+    if let Some(old) = &mut state.ckr {
+        old.zeroize();
+    }
+    state.ckr = Some(ck);
     state.nr = 0;
     if let Some(previous) = state.dhr_pub.clone() {
         state.retire(&previous);
@@ -947,9 +969,9 @@ fn recv_step(
     send_step(state, rx, peer_kem, rng)
 }
 
-fn message_key(mk: &[u8]) -> Result<[u8; 32]> {
-    let mut out = [0u8; 32];
-    hkdf_sha256(mk, b"", LABEL_MSG, &mut out)?;
+fn message_key(mk: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut out = Zeroizing::new([0u8; 32]);
+    hkdf_sha256(mk, b"", LABEL_MSG, &mut out[..])?;
     Ok(out)
 }
 
@@ -965,8 +987,8 @@ fn skip_to(state: &mut State, chain_pub: &[u8], until: i64) -> Result<()> {
             .ckr
             .as_deref()
             .ok_or(Error::Crypto("no receiving chain"))?;
-        let mk = hmac_sha256(ckr, &[1]);
-        let next = hmac_sha256(ckr, &[2]);
+        let mk = Zeroizing::new(hmac_sha256(ckr, &[1]));
+        let next = Zeroizing::new(hmac_sha256(ckr, &[2]));
         state.skipped.push((
             format!("{}:{}", b64_encode(chain_pub), state.nr),
             mk.to_vec(),
@@ -975,7 +997,8 @@ fn skip_to(state: &mut State, chain_pub: &[u8], until: i64) -> Result<()> {
         state.nr += 1;
     }
     while state.skipped.len() > MAX_SKIP as usize {
-        state.skipped.remove(0);
+        // The oldest key is given up: wipe it as it leaves.
+        state.skipped.remove(0).1.zeroize();
     }
     Ok(())
 }
