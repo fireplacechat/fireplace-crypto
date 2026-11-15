@@ -472,6 +472,95 @@ fn a_store_reloaded_from_saved_records_carries_on() {
 }
 
 #[test]
+fn members_are_reported_with_certificate_hash_and_generation() {
+    let (mut alice, mut bob1, _) = book_club();
+    let hash = b64_encode(&[7u8; 32]);
+    let info = bob1.info();
+    let members = field(&info, "members").as_array().unwrap();
+    assert_eq!(members.len(), 3);
+    for m in members {
+        assert_eq!(s(m, "certHash"), hash);
+        assert_eq!(field(m, "generation").as_i64().unwrap(), 1);
+    }
+    // The sender of a message and the committer of a Commit carry them too.
+    let got = bob1.receive(&alice.send("hello"));
+    assert_eq!(s(field(&got, "sender"), "certHash"), hash);
+    let update = alice.change(&format!(r#"{{"op":"commit_update","gid":"{GID}"}}"#));
+    alice.change(&format!(r#"{{"op":"merge_pending","gid":"{GID}"}}"#));
+    let got = bob1.receive(&s(&update, "commit"));
+    assert_eq!(
+        field(field(&got, "committer"), "generation")
+            .as_i64()
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn a_credential_with_a_malformed_hash_or_generation_is_refused() {
+    let a = identity();
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    // A negative generation cannot be issued.
+    let b = identity();
+    let mut store = GroupStore::open(HashMap::new());
+    assert!(
+        store
+            .call(&format!(
+                r#"{{"op":"device","identity":{},"uid":"bob","device":"bob-phone","deviceCertHash":"{}","generation":-1}}"#,
+                to_json(&Json::Str(b.to_json())),
+                b64_encode(&[7u8; 32]),
+            ))
+            .is_err()
+    );
+    // Credentials signed by the account itself, with a short hash and with a
+    // generation too large to report: both are refused when added.
+    for (hash_len, generation) in [(31usize, 1u64), (32, u64::MAX)] {
+        let mut bob = phone(&b, "bob", "bob-phone");
+        let key = bob.store.provider.get(REC_SIGNATURE_KEY).unwrap();
+        let mut rng = Rng::os();
+        let mut forged = FireplaceCredential::issue(
+            &b,
+            "bob",
+            "bob-phone",
+            &[7u8; 32],
+            &key,
+            generation,
+            &mut rng,
+        )
+        .unwrap();
+        if hash_len != 32 {
+            // `issue` refuses a short hash, so sign one by hand.
+            forged = FireplaceCredential::issue_unchecked(
+                &b,
+                "bob",
+                "bob-phone",
+                &vec![7u8; hash_len],
+                &key,
+                generation,
+                &mut rng,
+            )
+            .unwrap();
+        }
+        bob.store
+            .provider
+            .put(REC_CREDENTIAL, forged.encode().unwrap());
+        let kp = bob.packages(1).remove(0);
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_add","gid":"{GID}","keyPackages":["{kp}"]}}"#
+                ))
+                .is_err(),
+            "hash {hash_len} generation {generation}"
+        );
+        assert!(alice.store.accept().is_err());
+    }
+}
+
+#[test]
 fn applying_the_changes_reproduces_the_store() {
     let (mut alice, mut bob1, _) = book_club();
     let mut copy = bob1.store.records();
