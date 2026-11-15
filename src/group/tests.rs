@@ -220,6 +220,80 @@ fn a_forged_credential_cannot_be_added() {
 }
 
 #[test]
+fn an_add_names_the_account_and_can_be_held_to_an_expected_one() {
+    let (a, b, other) = (identity(), identity(), identity());
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    let mut bob1 = phone(&b, "bob", "bob-phone");
+    let mut bob2 = phone(&b, "bob", "bob-tablet");
+    let packages = [bob1.packages(1), bob2.packages(1)].concat();
+    let list = format!("\"{}\",\"{}\"", packages[0], packages[1]);
+    let bob_identity = b64_encode(&b.public_bytes().unwrap());
+
+    // The result names each device before anything is merged or sent.
+    let out = alice
+        .raw(&format!(
+            r#"{{"op":"commit_add","gid":"{GID}","keyPackages":[{list}],"uid":"bob","identity":"{bob_identity}"}}"#
+        ))
+        .unwrap();
+    let added = field(&out, "added").as_array().unwrap();
+    assert_eq!(added.len(), 2);
+    assert_eq!(s(&added[0], "uid"), "bob");
+    assert_eq!(s(&added[0], "device"), "bob-phone");
+    assert_eq!(s(&added[1], "device"), "bob-tablet");
+    assert_eq!(s(&added[0], "identity"), bob_identity);
+    alice.store.rollback().unwrap();
+
+    // A different expected account, or the right account under another
+    // identity key, is refused and changes nothing.
+    let before = alice.info();
+    let other_identity = b64_encode(&other.public_bytes().unwrap());
+    for expected in [
+        format!(r#""uid":"carol","identity":"{bob_identity}""#),
+        format!(r#""uid":"bob","identity":"{other_identity}""#),
+        r#""uid":"carol""#.to_string(),
+        format!(r#""identity":"{other_identity}""#),
+    ] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_add","gid":"{GID}","keyPackages":[{list}],{expected}}}"#
+                ))
+                .is_err(),
+            "{expected}"
+        );
+        assert_eq!(alice.info(), before);
+        assert!(alice.store.accept().is_err());
+    }
+}
+
+#[test]
+fn one_add_is_one_account() {
+    let (a, b, c) = (identity(), identity(), identity());
+    let mut alice = phone(&a, "alice", "alice-phone");
+    alice.change(&format!(
+        r#"{{"op":"create","gid":"{GID}","name":"Book club"}}"#
+    ));
+    let mut bob = phone(&b, "bob", "bob-phone");
+    let mut carol = phone(&c, "carol", "carol-phone");
+    // The same account id under a second identity key is a second account.
+    let mut bob_again = phone(&c, "bob", "bob-tablet");
+    let bob_kp = bob.packages(1).remove(0);
+    for second in [carol.packages(1).remove(0), bob_again.packages(1).remove(0)] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_add","gid":"{GID}","keyPackages":["{bob_kp}","{second}"]}}"#
+                ))
+                .is_err()
+        );
+        assert!(alice.store.accept().is_err());
+    }
+}
+
+#[test]
 fn rollback_restores_the_store_and_a_change_must_finish_first() {
     let (mut alice, mut bob1, _) = book_club();
     let ct = alice.send("hello");
@@ -241,6 +315,94 @@ fn rollback_restores_the_store_and_a_change_must_finish_first() {
     assert_eq!(bob1.store.records(), saved);
     // The same message decrypts again, because nothing was kept.
     assert_eq!(text(&bob1.receive(&ct)), "hello");
+}
+
+/// A Commit by `phone` that sets the metadata extension to exactly `raw`,
+/// as a modified app could, without the checks `commit_meta` applies.
+fn raw_meta_commit(phone: &mut Phone, raw: Vec<u8>) -> String {
+    let gid = GroupId::from_slice(&crate::codec::b64url_decode(GID).unwrap());
+    let mut group = phone.store.load(&gid).unwrap();
+    let (signer, _) = phone.store.signer().unwrap();
+    let extensions = Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(META_EXTENSION)],
+            &[],
+            &[CredentialType::Basic],
+        )),
+        Extension::Unknown(META_EXTENSION, UnknownExtension(raw)),
+    ])
+    .unwrap();
+    let (commit, _, _) = group
+        .update_group_context_extensions(&phone.store.provider, extensions, &signer)
+        .unwrap();
+    b64_encode(&tls(&commit).unwrap())
+}
+
+fn raw_meta(name: &str, admins: &[&str]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = vec![b"fireplace-group-meta-v1", name.as_bytes()];
+    parts.extend(admins.iter().map(|a| a.as_bytes()));
+    crate::codec::lp(&parts).unwrap()
+}
+
+#[test]
+fn received_metadata_is_held_to_the_rules_for_sent_metadata() {
+    let long = "x".repeat(41);
+    let many: Vec<String> = (0..65).map(|i| format!("account-{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        (long.as_str(), vec!["alice"]),
+        ("", vec!["alice"]),
+        (" padded ", vec!["alice"]),
+        ("Book club", vec!["alice", "alice"]),
+        ("Book club", vec!["alice", ""]),
+        ("Book club", vec!["a/b"]),
+        ("Book club", many),
+    ];
+    for (name, admins) in cases {
+        let (mut alice, mut bob1, _) = book_club();
+        let commit = raw_meta_commit(&mut bob1, raw_meta(name, &admins));
+        let before = alice.info();
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"process","gid":"{GID}","message":"{commit}"}}"#
+                ))
+                .is_err(),
+            "{name:?} {admins:?}"
+        );
+        // Refused, and nothing changed or left open.
+        assert_eq!(alice.info(), before);
+        assert!(alice.store.accept().is_err());
+    }
+    // Metadata within the rules, sent the same raw way, is accepted.
+    let (mut alice, mut bob1, _) = book_club();
+    let commit = raw_meta_commit(&mut bob1, raw_meta("Tea club", &["alice", "bob"]));
+    let got = alice.receive(&commit);
+    assert_eq!(s(&got, "name"), "Tea club");
+    assert_eq!(field(&got, "admins").as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn this_device_cannot_send_metadata_others_would_refuse() {
+    let (mut alice, _, _) = book_club();
+    for admins in [r#"["alice","alice"]"#, r#"["alice",""]"#, r#"["a:b"]"#] {
+        assert!(
+            alice
+                .raw(&format!(
+                    r#"{{"op":"commit_meta","gid":"{GID}","admins":{admins}}}"#
+                ))
+                .is_err(),
+            "{admins}"
+        );
+        assert!(alice.store.accept().is_err());
+    }
+    // An empty list and a normal list are still allowed.
+    for admins in ["[]", r#"["alice","bob"]"#] {
+        alice.change(&format!(
+            r#"{{"op":"commit_meta","gid":"{GID}","admins":{admins}}}"#
+        ));
+        alice.change(&format!(r#"{{"op":"discard_pending","gid":"{GID}"}}"#));
+    }
 }
 
 #[test]

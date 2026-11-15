@@ -133,12 +133,14 @@ pub fn unlp(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut parts = Vec::new();
     let mut i = 0;
     while i < data.len() {
-        if i + 4 > data.len() {
+        // Compare with what is left. `i + len` could pass `usize::MAX` where
+        // `usize` is 32 bits, and wrap in a release build.
+        if data.len() - i < 4 {
             return Err(Error::Invalid("truncated length"));
         }
         let len = u32::from_be_bytes(data[i..i + 4].try_into().expect("4 bytes")) as usize;
         i += 4;
-        if i + len > data.len() {
+        if len > data.len() - i {
             return Err(Error::Invalid("truncated field"));
         }
         parts.push(data[i..i + len].to_vec());
@@ -305,6 +307,12 @@ const MAX_JSON_DEPTH: usize = 32;
 /// happens before the parser walks the text.
 const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 
+/// Most members one object may have. A repeated key replaces the earlier one,
+/// which takes a scan of the object for every member; without a cap, a large
+/// object costs time that grows with the square of its size. The largest
+/// object Fireplace stores is a session's skipped keys, at most 1,000.
+const MAX_OBJECT_MEMBERS: usize = 4096;
+
 pub fn parse_json(input: &str) -> Result<Json> {
     if input.len() > MAX_JSON_BYTES {
         return Err(Error::Invalid("json too large"));
@@ -416,6 +424,8 @@ impl<'a> Parser<'a> {
             let value = self.value(depth + 1)?;
             if let Some(existing) = pairs.iter_mut().find(|(k, _)| k == &key) {
                 existing.1 = value;
+            } else if pairs.len() >= MAX_OBJECT_MEMBERS {
+                return Err(Error::Invalid("json object too large"));
             } else {
                 pairs.push((key, value));
             }
@@ -741,6 +751,27 @@ mod tests {
     }
 
     #[test]
+    fn a_length_larger_than_the_rest_is_refused() {
+        // The largest length, after one empty field: on a 32-bit target the
+        // old sum `i + len` wrapped past zero here.
+        assert!(unlp(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]).is_err());
+        assert!(unlp(&[0xff, 0xff, 0xff, 0xff]).is_err());
+        assert!(unlp(&[0xff, 0xff, 0xff, 0xfc, 1, 2, 3, 4]).is_err());
+        // Fewer than four bytes where a length should be.
+        for cut in 1..4 {
+            assert!(unlp(&[0, 0, 0, 0][..cut]).is_err());
+        }
+        // Every truncation of a valid encoding is refused or is a shorter list.
+        let whole = lp(&[b"ab", b"", b"cde"]).unwrap();
+        for cut in 0..whole.len() {
+            if let Ok(parts) = unlp(&whole[..cut]) {
+                let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+                assert_eq!(lp(&refs).unwrap(), &whole[..cut]);
+            }
+        }
+    }
+
+    #[test]
     fn json_preserves_order_and_rejects_floats() {
         let value = parse_json(r#"{"b":1,"a":"x","n":null}"#).unwrap();
         assert_eq!(to_json(&value), r#"{"b":1,"a":"x","n":null}"#);
@@ -806,5 +837,50 @@ mod tests {
         );
         let big = " ".repeat(MAX_JSON_BYTES + 1);
         assert!(parse_json(&big).is_err());
+    }
+
+    fn object_of(members: usize) -> String {
+        let mut text = String::from("{");
+        for i in 0..members {
+            if i > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("\"{i:x}\":1"));
+        }
+        text.push('}');
+        text
+    }
+
+    #[test]
+    fn json_rejects_an_object_with_too_many_members() {
+        let full = parse_json(&object_of(MAX_OBJECT_MEMBERS)).unwrap();
+        assert_eq!(full.as_object().unwrap().len(), MAX_OBJECT_MEMBERS);
+        assert!(parse_json(&object_of(MAX_OBJECT_MEMBERS + 1)).is_err());
+        // A repeated key is not a new member, so it is still accepted at the cap.
+        let mut repeated = object_of(MAX_OBJECT_MEMBERS);
+        repeated.pop();
+        repeated.push_str(",\"0\":2}");
+        let value = parse_json(&repeated).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.len(), MAX_OBJECT_MEMBERS);
+        assert_eq!(obj_i64(obj, "0").unwrap(), 2);
+        // The cap is per object: a nested object has its own count, and an
+        // array is not limited.
+        let nested = format!("[{},{}]", object_of(3000), object_of(3000));
+        assert!(parse_json(&nested).is_ok());
+        let array = format!("[{}1]", "1,".repeat(100_000));
+        assert_eq!(
+            parse_json(&array).unwrap().as_array().unwrap().len(),
+            100_001
+        );
+    }
+
+    #[test]
+    fn a_large_object_is_refused_quickly() {
+        // 160,000 members took over a minute to parse before the cap.
+        let text = object_of(160_000);
+        let started = std::time::Instant::now();
+        assert!(parse_json(&text).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

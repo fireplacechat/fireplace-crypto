@@ -13,7 +13,7 @@
 
 use crate::error::{Error, Result};
 use crate::rng::Rng;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes, MlDsa65,
     Signature as DsaSignature, VerifyingKey as DsaVerifyingKey,
@@ -180,7 +180,9 @@ pub fn ed25519_verify(public: &[u8], message: &[u8], signature: &[u8]) -> bool {
     let Ok(signature) = Signature::from_slice(signature) else {
         return false;
     };
-    verifying.verify(message, &signature).is_ok()
+    // The strict check also refuses a public key or an `R` of small order.
+    // Under such a key one signature verifies for every message.
+    verifying.verify_strict(message, &signature).is_ok()
 }
 
 fn dsa_expanded(secret: &[u8]) -> Result<ExpandedSigningKey<MlDsa65>> {
@@ -284,6 +286,47 @@ mod tests {
             "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
         );
         assert!(ed25519_verify(&public, b"", &signature));
+    }
+
+    #[test]
+    fn ed25519_refuses_small_order_keys_and_points() {
+        // The eight points of small order, as RFC 7748 and RFC 8032 encode
+        // them (the last two are the non-canonical forms of the first two).
+        let small = [
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+        ];
+        // `R` is the identity and `S` is zero: valid for every message under
+        // a small-order key when the check is not strict.
+        let mut signature = [0u8; 64];
+        signature[0] = 1;
+        for key in small {
+            let key = hex(key);
+            for message in [&b"one"[..], b"two", b""] {
+                assert!(
+                    !ed25519_verify(&key, message, &signature),
+                    "small-order key accepted"
+                );
+            }
+            // A small-order `R` under an honest key is refused as well.
+            let seed = [3u8; 32];
+            let public = ed25519_public(&seed).unwrap();
+            let mut forged = ed25519_sign(&seed, b"one").unwrap();
+            forged[..32].copy_from_slice(&key);
+            assert!(!ed25519_verify(&public, b"one", &forged));
+        }
+        // An honest signature still verifies, and only for its message.
+        let seed = [3u8; 32];
+        let public = ed25519_public(&seed).unwrap();
+        let good = ed25519_sign(&seed, b"one").unwrap();
+        assert!(ed25519_verify(&public, b"one", &good));
+        assert!(!ed25519_verify(&public, b"two", &good));
     }
 
     #[test]
