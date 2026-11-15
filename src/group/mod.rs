@@ -362,16 +362,33 @@ impl GroupStore {
 
     /// A Commit by this device. It stays pending until the app knows whether the
     /// server took it (`merge_pending`) or another Commit won (`discard_pending`).
+    ///
+    /// `commit_add` adds the devices of one account. Its result lists them in
+    /// `added` (account id, device id and account identity key of each key
+    /// package, in the order given) so the app can compare them with the account
+    /// it means to add before it saves or sends anything. The request may carry
+    /// `uid` and `identity` (base64); every key package must then be for that
+    /// account under that identity key, or the call fails.
     fn commit(&mut self, obj: &[(String, Json)], kind: Commit) -> Result<Json> {
         let mut group = self.load(&gid(obj)?)?;
         let (signer, _) = self.signer()?;
         let mut welcome = None;
+        let mut adding: Vec<VerifiedMember> = Vec::new();
         let commit = match kind {
             Commit::Update => group
                 .self_update(&self.provider, &signer, LeafNodeParameters::default())
                 .map_err(|_| Error::Crypto("update"))?
                 .into_commit(),
             Commit::Add => {
+                // The account the caller means to add, when it says so.
+                let want_uid = match obj_opt(obj, "uid") {
+                    Some(uid) => Some(uid.as_str()?),
+                    None => None,
+                };
+                let want_identity = match obj_opt(obj, "identity") {
+                    Some(identity) => Some(b64_decode(identity.as_str()?)?),
+                    None => None,
+                };
                 let mut packages = Vec::new();
                 for p in obj_get(obj, "keyPackages")?.as_array()? {
                     let bytes = b64_decode(p.as_str()?)?;
@@ -380,11 +397,28 @@ impl GroupStore {
                         .validate(self.provider.crypto(), ProtocolVersion::Mls10)
                         .map_err(|_| Error::Crypto("key package"))?;
                     // Check the Fireplace credential before adding anybody.
-                    VerifiedMember::check(
+                    let member = VerifiedMember::check(
                         kp.leaf_node().credential(),
                         kp.leaf_node().signature_key().as_slice(),
                         0,
                     )?;
+                    // One account at a time: every package names the same
+                    // account under the same identity key, and the one the
+                    // caller expects when it names one.
+                    if adding
+                        .first()
+                        .is_some_and(|first| !first.same_account(&member))
+                    {
+                        return Err(Error::Invalid("add one account (1-4 devices) at a time"));
+                    }
+                    if want_uid.is_some_and(|uid| uid != member.uid)
+                        || want_identity
+                            .as_deref()
+                            .is_some_and(|identity| identity != member.identity)
+                    {
+                        return Err(Error::Crypto("not the expected account"));
+                    }
+                    adding.push(member);
                     packages.push(kp);
                 }
                 if packages.is_empty() || packages.len() > 4 {
@@ -436,6 +470,12 @@ impl GroupStore {
         ];
         if let Some(w) = welcome {
             pairs.push(("welcome".into(), Json::Str(b64_encode(&tls(&w)?))));
+            // Whom this adds, in the order given, for the caller to check
+            // before it saves or sends anything.
+            pairs.push((
+                "added".into(),
+                Json::Arr(adding.iter().map(VerifiedMember::account_json).collect()),
+            ));
         }
         Ok(Json::object(pairs))
     }
