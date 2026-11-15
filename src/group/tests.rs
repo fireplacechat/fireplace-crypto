@@ -243,93 +243,6 @@ fn rollback_restores_the_store_and_a_change_must_finish_first() {
     assert_eq!(text(&bob1.receive(&ct)), "hello");
 }
 
-#[test]
-fn only_one_commit_wins_an_epoch() {
-    let (mut alice, mut bob1, mut bob2) = book_club();
-    let a = alice.change(&format!(r#"{{"op":"commit_update","gid":"{GID}"}}"#));
-    let b = bob1.change(&format!(r#"{{"op":"commit_update","gid":"{GID}"}}"#));
-    // The server took Alice's. Bob's device discards its own and applies hers.
-    alice.change(&format!(r#"{{"op":"merge_pending","gid":"{GID}"}}"#));
-    bob1.change(&format!(r#"{{"op":"discard_pending","gid":"{GID}"}}"#));
-    bob1.receive(&s(&a, "commit"));
-    bob2.receive(&s(&a, "commit"));
-    // Bob's losing Commit is for an old epoch and is refused everywhere.
-    assert!(
-        bob2.raw(&format!(
-            r#"{{"op":"process","gid":"{GID}","message":"{}"}}"#,
-            s(&b, "commit")
-        ))
-        .is_err()
-    );
-    let ct = bob1.send("still in step");
-    assert_eq!(text(&alice.receive(&ct)), "still in step");
-}
-
-#[test]
-fn a_store_reloaded_from_saved_records_carries_on() {
-    let (mut alice, bob1, _) = book_club();
-    let mut reloaded = Phone {
-        store: GroupStore::open(bob1.store.records()),
-        uid: bob1.uid.clone(),
-        device: bob1.device.clone(),
-    };
-    let ct = alice.send("after a restart");
-    assert_eq!(text(&reloaded.receive(&ct)), "after a restart");
-    let groups = reloaded.raw(r#"{"op":"groups"}"#).unwrap();
-    assert_eq!(
-        field(&groups, "groups").as_array().unwrap(),
-        &[Json::Str(GID.into())]
-    );
-}
-
-#[test]
-fn applying_the_changes_reproduces_the_store() {
-    let (mut alice, mut bob1, _) = book_club();
-    let mut copy = bob1.store.records();
-    let ct = alice.send("delta");
-    let out = bob1
-        .raw(&format!(
-            r#"{{"op":"process","gid":"{GID}","message":"{ct}"}}"#
-        ))
-        .unwrap();
-    for c in field(&out, "changes").as_array().unwrap() {
-        let k = b64_decode(&s(c, "k")).unwrap();
-        match field(c, "v") {
-            Json::Null => {
-                copy.remove(&k);
-            }
-            v => {
-                copy.insert(k, b64_decode(v.as_str().unwrap()).unwrap());
-            }
-        }
-    }
-    bob1.store.accept().unwrap();
-    assert_eq!(copy, bob1.store.records());
-}
-
-#[test]
-fn bad_requests_are_refused() {
-    let (mut alice, _, _) = book_club();
-    for bad in [
-        r#"{"op":"nope"}"#.to_string(),
-        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":""}}"#,
-            b64url_encode(&[9; 16])
-        ),
-        format!(
-            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
-            b64url_encode(&[9; 16]),
-            "x".repeat(41)
-        ),
-        r#"{"op":"key_packages","count":11}"#.to_string(),
-        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
-    ] {
-        assert!(alice.raw(&bad).is_err(), "{bad}");
-        assert!(alice.store.accept().is_err());
-    }
-}
-
 /// A Commit by `phone` that sets the metadata extension to exactly `raw`,
 /// as a modified app could, without the checks `commit_meta` applies.
 fn raw_meta_commit(phone: &mut Phone, raw: Vec<u8>) -> String {
@@ -415,5 +328,92 @@ fn this_device_cannot_send_metadata_others_would_refuse() {
             r#"{{"op":"commit_meta","gid":"{GID}","admins":{admins}}}"#
         ));
         alice.change(&format!(r#"{{"op":"discard_pending","gid":"{GID}"}}"#));
+    }
+}
+
+#[test]
+fn only_one_commit_wins_an_epoch() {
+    let (mut alice, mut bob1, mut bob2) = book_club();
+    let a = alice.change(&format!(r#"{{"op":"commit_update","gid":"{GID}"}}"#));
+    let b = bob1.change(&format!(r#"{{"op":"commit_update","gid":"{GID}"}}"#));
+    // The server took Alice's. Bob's device discards its own and applies hers.
+    alice.change(&format!(r#"{{"op":"merge_pending","gid":"{GID}"}}"#));
+    bob1.change(&format!(r#"{{"op":"discard_pending","gid":"{GID}"}}"#));
+    bob1.receive(&s(&a, "commit"));
+    bob2.receive(&s(&a, "commit"));
+    // Bob's losing Commit is for an old epoch and is refused everywhere.
+    assert!(
+        bob2.raw(&format!(
+            r#"{{"op":"process","gid":"{GID}","message":"{}"}}"#,
+            s(&b, "commit")
+        ))
+        .is_err()
+    );
+    let ct = bob1.send("still in step");
+    assert_eq!(text(&alice.receive(&ct)), "still in step");
+}
+
+#[test]
+fn a_store_reloaded_from_saved_records_carries_on() {
+    let (mut alice, bob1, _) = book_club();
+    let mut reloaded = Phone {
+        store: GroupStore::open(bob1.store.records()),
+        uid: bob1.uid.clone(),
+        device: bob1.device.clone(),
+    };
+    let ct = alice.send("after a restart");
+    assert_eq!(text(&reloaded.receive(&ct)), "after a restart");
+    let groups = reloaded.raw(r#"{"op":"groups"}"#).unwrap();
+    assert_eq!(
+        field(&groups, "groups").as_array().unwrap(),
+        &[Json::Str(GID.into())]
+    );
+}
+
+#[test]
+fn applying_the_changes_reproduces_the_store() {
+    let (mut alice, mut bob1, _) = book_club();
+    let mut copy = bob1.store.records();
+    let ct = alice.send("delta");
+    let out = bob1
+        .raw(&format!(
+            r#"{{"op":"process","gid":"{GID}","message":"{ct}"}}"#
+        ))
+        .unwrap();
+    for c in field(&out, "changes").as_array().unwrap() {
+        let k = b64_decode(&s(c, "k")).unwrap();
+        match field(c, "v") {
+            Json::Null => {
+                copy.remove(&k);
+            }
+            v => {
+                copy.insert(k, b64_decode(v.as_str().unwrap()).unwrap());
+            }
+        }
+    }
+    bob1.store.accept().unwrap();
+    assert_eq!(copy, bob1.store.records());
+}
+
+#[test]
+fn bad_requests_are_refused() {
+    let (mut alice, _, _) = book_club();
+    for bad in [
+        r#"{"op":"nope"}"#.to_string(),
+        r#"{"op":"create","gid":"short","name":"x"}"#.into(),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":""}}"#,
+            b64url_encode(&[9; 16])
+        ),
+        format!(
+            r#"{{"op":"create","gid":"{}","name":"{}"}}"#,
+            b64url_encode(&[9; 16]),
+            "x".repeat(41)
+        ),
+        r#"{"op":"key_packages","count":11}"#.to_string(),
+        format!(r#"{{"op":"process","gid":"{GID}","message":"AAAA"}}"#),
+    ] {
+        assert!(alice.raw(&bad).is_err(), "{bad}");
+        assert!(alice.store.accept().is_err());
     }
 }
