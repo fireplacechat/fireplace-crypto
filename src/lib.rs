@@ -33,7 +33,8 @@ pub use error::{Error, Result};
 pub use fingerprint::{identity_fingerprint, safety_number};
 pub use identity::AccountIdentity;
 pub use link::{
-    SealedIdentity, confirmation_code, open as link_open, request_fingerprint, seal as link_seal,
+    LINK_SECRET_MAX, LINK_SECRET_MIN, SealedIdentity, open as link_open, request_fingerprint,
+    seal as link_seal,
 };
 pub use prekeys::{
     PreKeyBundle, PreKeyKind, PreKeyRecord, PublishedPreKey, one_time, sign as sign_prekey,

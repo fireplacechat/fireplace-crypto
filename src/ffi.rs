@@ -23,7 +23,7 @@ use std::panic::AssertUnwindSafe;
 #[cfg(feature = "test-rng")]
 use std::sync::Mutex;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::device::{DeviceBundle, DeviceKeys};
 use crate::error::{Error, Result};
@@ -723,28 +723,7 @@ pub unsafe extern "C" fn fp_link_fingerprint(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fp_link_confirmation(
-    identity_pub: *const u8,
-    identity_len: usize,
-    x25519: *const u8,
-    x_len: usize,
-    kem: *const u8,
-    kem_len: usize,
-    out_text: *mut FpBuf,
-) -> i32 {
-    clear_buf(out_text);
-    call(|| {
-        let text = link::confirmation_code(
-            unsafe { slice(identity_pub, identity_len)? },
-            unsafe { slice(x25519, x_len)? },
-            unsafe { slice(kem, kem_len)? },
-        )?;
-        write_buf(out_text, text.into_bytes())
-    })
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fp_link_seal(
+pub unsafe extern "C" fn fp_link_seal_v2(
     identity_json: *const u8,
     identity_len: usize,
     uid: *const u8,
@@ -755,6 +734,8 @@ pub unsafe extern "C" fn fp_link_seal(
     x_len: usize,
     kem: *const u8,
     kem_len: usize,
+    secret: *const u8,
+    secret_len: usize,
     out_json: *mut FpBuf,
 ) -> i32 {
     clear_buf(out_json);
@@ -764,19 +745,23 @@ pub unsafe extern "C" fn fp_link_seal(
         let device_id = unsafe { text(device_id, device_len)? };
         let x25519 = unsafe { slice(x25519, x_len)? }.to_vec();
         let kem = unsafe { slice(kem, kem_len)? }.to_vec();
-        let sealed = with_rng(|rng| link::seal(&identity, uid, device_id, &x25519, &kem, rng))?;
+        let secret = Zeroizing::new(unsafe { slice(secret, secret_len)? }.to_vec());
+        let sealed =
+            with_rng(|rng| link::seal(&identity, uid, device_id, &x25519, &kem, &secret, rng))?;
         write_buf(out_json, sealed.to_json().into_bytes())
     })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fp_link_open(
+pub unsafe extern "C" fn fp_link_open_v2(
     sealed_json: *const u8,
     sealed_len: usize,
     uid: *const u8,
     uid_len: usize,
     device_json: *const u8,
     device_len: usize,
+    secret: *const u8,
+    secret_len: usize,
     out_json: *mut FpBuf,
 ) -> i32 {
     clear_buf(out_json);
@@ -784,7 +769,8 @@ pub unsafe extern "C" fn fp_link_open(
         let sealed = SealedIdentity::from_json(unsafe { text(sealed_json, sealed_len)? })?;
         let uid = unsafe { text(uid, uid_len)? };
         let keys = DeviceKeys::from_json(unsafe { text(device_json, device_len)? })?;
-        let identity = link::open(&sealed, uid, &keys)?;
+        let secret = unsafe { slice(secret, secret_len)? };
+        let identity = link::open(&sealed, uid, &keys, secret)?;
         write_buf(out_json, identity.to_json().into_bytes())
     })
 }

@@ -6,7 +6,7 @@ use crate::codec::{self, Json};
 use crate::device::DeviceKeys;
 use crate::fingerprint::{identity_fingerprint, safety_number};
 use crate::identity::AccountIdentity;
-use crate::link::{confirmation_code, request_fingerprint, seal as link_seal};
+use crate::link::{request_fingerprint, seal as link_seal};
 use crate::prekeys::{self, PreKeyBundle, PreKeyRecord};
 use crate::recovery::{self, RecoveryKey};
 use crate::rng::Rng;
@@ -202,11 +202,6 @@ fn scripted_handshake_matches_dart() {
         &request_fingerprint(&bob_keys.x25519_pub, &bob_keys.kem_pub).unwrap(),
         text(section, "linkFingerprint"),
     );
-    same(
-        "link code",
-        &confirmation_code(&alice_pub, &bob_keys.x25519_pub, &bob_keys.kem_pub).unwrap(),
-        text(section, "linkCode"),
-    );
 }
 
 #[test]
@@ -228,6 +223,7 @@ fn scripted_recovery_and_link_match_dart() {
         &device.device_id,
         &device.x25519_pub,
         &device.kem_pub,
+        &codec::b64_decode(text(section, "linkSecret")).unwrap(),
         &mut rng,
     )
     .unwrap();
