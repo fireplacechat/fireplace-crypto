@@ -471,11 +471,60 @@ fn recovery_and_link_roundtrip() {
         &device.device_id,
         &device.x25519_pub,
         &device.kem_pub,
+        &[7u8; 16],
         &mut rng,
     )
     .unwrap();
-    let moved = link_open(&sealed, "ada", &device).unwrap();
+    let moved = link_open(&sealed, "ada", &device, &[7u8; 16]).unwrap();
     assert_eq!(moved.to_json(), identity.to_json());
+}
+
+#[test]
+fn link_response_needs_the_secret_from_the_qr_code() {
+    let mut rng = Rng::os();
+    let identity = AccountIdentity::generate(&mut rng).unwrap();
+    let device = DeviceKeys::generate(&mut rng).unwrap();
+    let secret = [0x5a_u8; 16];
+    let seal = |secret: &[u8], rng: &mut Rng| {
+        link_seal(
+            &identity,
+            "ada",
+            &device.device_id,
+            &device.x25519_pub,
+            &device.kem_pub,
+            secret,
+            rng,
+        )
+    };
+    let sealed = seal(&secret, &mut rng).unwrap();
+    assert!(link_open(&sealed, "ada", &device, &secret).is_ok());
+
+    // Everything else right, the secret wrong in one bit, in length, or guessed.
+    let mut flipped = secret;
+    flipped[15] ^= 1;
+    for wrong in [&flipped[..], &[0x5a_u8; 17][..], &[0u8; 16][..]] {
+        assert!(link_open(&sealed, "ada", &device, wrong).is_err());
+    }
+    // A response made by someone who knows the public keys and not the secret.
+    let other = AccountIdentity::generate(&mut rng).unwrap();
+    let planted = link_seal(
+        &other,
+        "ada",
+        &device.device_id,
+        &device.x25519_pub,
+        &device.kem_pub,
+        &[0u8; 16],
+        &mut rng,
+    )
+    .unwrap();
+    assert!(link_open(&planted, "ada", &device, &secret).is_err());
+
+    // Too short or too long is refused on both sides before any work.
+    for bad in [&[][..], &[1u8; 15][..], &[1u8; 65][..]] {
+        assert!(seal(bad, &mut rng).is_err());
+        assert!(link_open(&sealed, "ada", &device, bad).is_err());
+    }
+    assert!(seal(&[1u8; 64], &mut rng).is_ok());
 }
 
 #[test]

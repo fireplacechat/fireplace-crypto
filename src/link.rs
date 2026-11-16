@@ -1,7 +1,10 @@
 //! Moving an account identity onto a new device of the same account.
 //!
-//! The new device's public keys are compared out of band (a short fingerprint
-//! and a 6-digit code). The seal is hybrid X25519 plus ML-KEM-768. A
+//! The new device shows a QR code that holds a fingerprint of its public keys
+//! and a random secret. The fingerprint tells the approving device which keys
+//! to seal to. The secret never leaves the two screens and goes into the
+//! sealing key, so only a device that read the QR code can make a response
+//! the new device will open. The seal is hybrid X25519 plus ML-KEM-768. A
 //! non-contributory X25519 shared secret is refused.
 
 use crate::aead;
@@ -56,17 +59,6 @@ pub fn request_fingerprint(x25519_pub: &[u8], kem_pub: &[u8]) -> Result<String> 
     Ok(b64url_encode(&hash[..16]))
 }
 
-pub fn confirmation_code(identity_pub: &[u8], x25519_pub: &[u8], kem_pub: &[u8]) -> Result<String> {
-    let hash = sha256(&lp(&[
-        b"fireplace/v1/link-sas",
-        identity_pub,
-        x25519_pub,
-        kem_pub,
-    ])?);
-    let n = u32::from_be_bytes(hash[..4].try_into().expect("4 bytes")) % 1_000_000;
-    Ok(format!("{n:06}"))
-}
-
 fn info(
     uid: &str,
     device_id: &str,
@@ -76,7 +68,7 @@ fn info(
     kem_pub: &[u8],
 ) -> Result<Vec<u8>> {
     lp(&[
-        b"fireplace/v1/link",
+        b"fireplace/v2/link",
         uid.as_bytes(),
         device_id.as_bytes(),
         ek,
@@ -86,15 +78,30 @@ fn info(
     ])
 }
 
-fn key(dh: &[u8], shared: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+/// Shortest and longest secret a QR code may carry, in bytes.
+pub const LINK_SECRET_MIN: usize = 16;
+pub const LINK_SECRET_MAX: usize = 64;
+
+fn check_secret(secret: &[u8]) -> Result<()> {
+    if secret.len() < LINK_SECRET_MIN || secret.len() > LINK_SECRET_MAX {
+        return Err(Error::Invalid("link secret"));
+    }
+    Ok(())
+}
+
+/// The two shared secrets have fixed lengths, so the QR secret after them
+/// needs no length prefix.
+fn key(dh: &[u8], shared: &[u8], secret: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     if !prim::contributory(dh) {
         return Err(Error::Crypto("Invalid device linking key."));
     }
-    let mut out = [0u8; 32];
-    hkdf_sha256(&concat(&[dh, shared]), b"", info, &mut out)?;
+    let mut out = Zeroizing::new([0u8; 32]);
+    let ikm = Zeroizing::new(concat(&[dh, shared, secret]));
+    hkdf_sha256(&ikm, b"", info, &mut out[..])?;
     Ok(out)
 }
 
+/// `secret` is the random value read from the new device's QR code.
 /// 32-byte ephemeral X25519 seed, 32 encapsulation coins, then a 12-byte nonce.
 pub fn seal(
     identity: &AccountIdentity,
@@ -102,21 +109,27 @@ pub fn seal(
     device_id: &str,
     x25519_pub: &[u8],
     kem_pub: &[u8],
+    secret: &[u8],
     rng: &mut Rng,
 ) -> Result<SealedIdentity> {
+    check_secret(secret)?;
     if kem_pub.len() != MLKEM_EK || x25519_pub.len() != 32 {
         return Err(Error::Invalid("link key"));
     }
     let mut seed = rng.array::<32>()?;
     let ek = prim::x25519_public(&seed)?.to_vec();
-    let dh = prim::x25519_shared(&seed, x25519_pub)?;
+    let dh = prim::x25519_shared(&seed, x25519_pub).map(Zeroizing::new);
     seed.zeroize();
-    let coins = rng.array::<32>()?;
-    let (kem_ct, shared) = prim::mlkem_encapsulate(kem_pub, &coins)?;
+    let dh = dh?;
+    let coins = Zeroizing::new(rng.array::<32>()?);
+    let (kem_ct, shared) = prim::mlkem_encapsulate(kem_pub, &coins[..])?;
+    let shared = Zeroizing::new(shared);
     let info = info(uid, device_id, &ek, &kem_ct, x25519_pub, kem_pub)?;
-    let plain = identity.to_json().into_bytes();
+    // The plaintext is every secret key of the account: wipe it when done.
+    let plain = Zeroizing::new(identity.to_json().into_bytes());
     let nonce = rng.array::<12>()?;
-    let (ct, mac) = aead::seal(&key(&dh, &shared, &info)?, &nonce, &info, &plain)
+    let sealing = key(&dh[..], &shared[..], secret, &info)?;
+    let (ct, mac) = aead::seal(&sealing[..], &nonce, &info, &plain)
         .map_err(|_| Error::Crypto("Invalid device linking key."))?;
     Ok(SealedIdentity {
         ek,
@@ -127,10 +140,18 @@ pub fn seal(
     })
 }
 
-pub fn open(sealed: &SealedIdentity, uid: &str, keys: &DeviceKeys) -> Result<AccountIdentity> {
+/// `secret` is the random value this device put in its QR code. A response
+/// sealed without it does not open.
+pub fn open(
+    sealed: &SealedIdentity,
+    uid: &str,
+    keys: &DeviceKeys,
+    secret: &[u8],
+) -> Result<AccountIdentity> {
+    check_secret(secret)?;
     let opened = (|| {
-        let dh = prim::x25519_shared(&keys.x25519_seed, &sealed.ek)?;
-        let shared = prim::mlkem_decapsulate(&keys.kem_secret, &sealed.kem_ct)?;
+        let dh = Zeroizing::new(prim::x25519_shared(&keys.x25519_seed, &sealed.ek)?);
+        let shared = Zeroizing::new(prim::mlkem_decapsulate(&keys.kem_secret, &sealed.kem_ct)?);
         let info = info(
             uid,
             &keys.device_id,
@@ -139,17 +160,18 @@ pub fn open(sealed: &SealedIdentity, uid: &str, keys: &DeviceKeys) -> Result<Acc
             &keys.x25519_pub,
             &keys.kem_pub,
         )?;
-        let plain = aead::open(
-            &key(&dh, &shared, &info)?,
+        let opening = key(&dh[..], &shared[..], secret, &info)?;
+        let plain = Zeroizing::new(aead::open(
+            &opening[..],
             &sealed.nonce,
             &info,
             &sealed.ct,
             &sealed.mac,
-        )?;
+        )?);
         let text = core::str::from_utf8(&plain).map_err(|_| Error::Invalid("link"))?;
         AccountIdentity::from_json(text)
     })();
     opened.map_err(|_| Error::Crypto("Could not decrypt the transferred identity."))
 }
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};

@@ -142,13 +142,15 @@ int32_t fp_recovery_decrypt(const uint8_t *blob, size_t blob_len, const uint8_t 
 
 int32_t fp_link_fingerprint(const uint8_t *x25519, size_t x_len, const uint8_t *kem, size_t kem_len,
                             FpBuf *out_text);
-int32_t fp_link_confirmation(const uint8_t *identity_pub, size_t identity_len, const uint8_t *x25519,
-                             size_t x_len, const uint8_t *kem, size_t kem_len, FpBuf *out_text);
-int32_t fp_link_seal(const uint8_t *identity_json, size_t identity_len, const uint8_t *uid, size_t uid_len,
-                     const uint8_t *device_id, size_t device_len, const uint8_t *x25519, size_t x_len,
-                     const uint8_t *kem, size_t kem_len, FpBuf *out_json);
-int32_t fp_link_open(const uint8_t *sealed_json, size_t sealed_len, const uint8_t *uid, size_t uid_len,
-                     const uint8_t *device_json, size_t device_len, FpBuf *out_json);
+/* secret: the 16 to 64 random bytes the new device shows in its QR code and
+ * sends nowhere else. A response sealed with a different secret does not open. */
+int32_t fp_link_seal_v2(const uint8_t *identity_json, size_t identity_len, const uint8_t *uid,
+                        size_t uid_len, const uint8_t *device_id, size_t device_len,
+                        const uint8_t *x25519, size_t x_len, const uint8_t *kem, size_t kem_len,
+                        const uint8_t *secret, size_t secret_len, FpBuf *out_json);
+int32_t fp_link_open_v2(const uint8_t *sealed_json, size_t sealed_len, const uint8_t *uid,
+                        size_t uid_len, const uint8_t *device_json, size_t device_len,
+                        const uint8_t *secret, size_t secret_len, FpBuf *out_json);
 
 int32_t fp_safety_number(const uint8_t *identity_a, size_t a_len, const uint8_t *identity_b, size_t b_len,
                          FpBuf *out_text);

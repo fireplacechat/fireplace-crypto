@@ -11,12 +11,19 @@ use crate::error::{Error, Result};
 use crate::identity::AccountIdentity;
 use crate::kdf::{hkdf_sha256, sha256};
 use crate::rng::Rng;
+use zeroize::{Zeroize, Zeroizing};
 
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const BACKUP_INFO: &[u8] = b"fireplace/v1/backup";
 
 pub struct RecoveryKey {
     bytes: [u8; 20],
+}
+
+impl Drop for RecoveryKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
 }
 
 impl core::fmt::Debug for RecoveryKey {
@@ -81,17 +88,18 @@ impl RecoveryKey {
         Ok(Some(Self { bytes: key }))
     }
 
-    fn aead_key(&self) -> Result<[u8; 32]> {
-        let mut out = [0u8; 32];
-        hkdf_sha256(&self.bytes, b"", BACKUP_INFO, &mut out)?;
+    fn aead_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        let mut out = Zeroizing::new([0u8; 32]);
+        hkdf_sha256(&self.bytes, b"", BACKUP_INFO, &mut out[..])?;
         Ok(out)
     }
 }
 
 pub fn encrypt(identity: &AccountIdentity, key: &RecoveryKey, rng: &mut Rng) -> Result<String> {
-    let plain = identity.to_json().into_bytes();
+    // The plaintext is every secret key of the account: wipe it when done.
+    let plain = Zeroizing::new(identity.to_json().into_bytes());
     let nonce = rng.array::<12>()?;
-    let (ciphertext, tag) = aead::seal(&key.aead_key()?, &nonce, BACKUP_INFO, &plain)?;
+    let (ciphertext, tag) = aead::seal(&key.aead_key()?[..], &nonce, BACKUP_INFO, &plain)?;
     let mut boxed = Vec::with_capacity(12 + ciphertext.len() + 16);
     boxed.extend_from_slice(&nonce);
     boxed.extend_from_slice(&ciphertext);
@@ -109,7 +117,8 @@ pub fn decrypt(blob: &str, key: &RecoveryKey) -> Result<AccountIdentity> {
     }
     let (nonce, rest) = boxed.split_at(12);
     let (ciphertext, tag) = rest.split_at(rest.len() - 16);
-    let plain = aead::open(&key.aead_key()?, nonce, BACKUP_INFO, ciphertext, tag)
+    let plain = aead::open(&key.aead_key()?[..], nonce, BACKUP_INFO, ciphertext, tag)
+        .map(Zeroizing::new)
         .map_err(|_| Error::Crypto("Wrong recovery key, or the backup is damaged."))?;
     let text = core::str::from_utf8(&plain)
         .map_err(|_| Error::Crypto("Wrong recovery key, or the backup is damaged."))?;
